@@ -1,0 +1,14 @@
+{
+    "apps": {
+      "org.onosproject.fpm": {
+        "fpm": {
+          "connections": [
+            {
+              "ip": "192.168.100.3",
+              "port": 2620
+            }
+          ]
+        }
+      }
+    }
+}

@@ -1,0 +1,30 @@
+{
+  "apps": {
+    "nycu.winlab.vrouter": {
+      "vrouter": {
+        "frr0-connect-point": "of:0000000000000001/2",
+        "quagga-mac": "00:00:00:00:00:01",
+        "quagga-ip4": "172.16.35.69",
+        "quagga-ip6": "2a0b:4e07:c4:35::69",
+        "virtual-gateway-ip4": "172.16.35.1",
+        "virtual-gateway-ip6": "2a0b:4e07:c4:35::1",
+        "virtual-gateway-mac": "00:00:00:00:00:02",
+        "external-port": "of:0000ceaa83f3a445/3"
+      }
+    }
+  },
+  "ports": {
+    "of:0000ceaa83f3a445/3": {
+      "interfaces": [
+        {
+          "name": "eth1",
+          "ips": [
+            "192.168.70.1/24",
+            "fd70::1/64",
+            "fe80::42:c0ff:fea8:46fd/128"
+          ]
+        }
+      ]
+    }
+  }
+}
