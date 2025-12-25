@@ -3,9 +3,9 @@
     "nycu.winlab.vrouter": {
       "vrouter": {
         "frr0-connect-point": "of:0000000000000001/2",
-        "quagga-mac": "00:00:00:00:00:01",
-        "quagga-ip4": "172.16.35.69",
-        "quagga-ip6": "2a0b:4e07:c4:35::69",
+        "frr0-mac": "00:00:00:00:00:01",
+        "frr0-ip4": "172.16.35.69",
+        "frr0-ip6": "2a0b:4e07:c4:35::69",
         "virtual-gateway-ip4": "172.16.35.1",
         "virtual-gateway-ip6": "2a0b:4e07:c4:35::1",
         "virtual-gateway-mac": "00:00:00:00:00:02",
@@ -19,8 +19,9 @@
         {
           "name": "eth1",
           "ips": [
-            "192.168.70.1/24",
-            "fd70::1/64",
+            "192.168.70.35/24",
+            "fd70::35/64",
+            "ff02::1:ff00:35/104",
             "fe80::42:c0ff:fea8:46fd/128"
           ]
         }

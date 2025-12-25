@@ -28,9 +28,9 @@ import org.onosproject.net.config.Config;
 public class VRouterConfig extends Config<ApplicationId> {
 
     private static final String FRR0_CONNECT_POINT = "frr0-connect-point";
-    private static final String QUAGGA_MAC = "quagga-mac";
-    private static final String QUAGGA_IP4 = "quagga-ip4";
-    private static final String QUAGGA_IP6 = "quagga-ip6";
+    private static final String FRR_ZERO_MAC = "frr0-mac";
+    private static final String FRR_ZERO_IP4 = "frr0-ip4";
+    private static final String FRR_ZERO_IP6 = "frr0-ip6";
     private static final String VIRTUAL_GATEWAY_IP4 = "virtual-gateway-ip4";
     private static final String VIRTUAL_GATEWAY_IP6 = "virtual-gateway-ip6";
     private static final String VIRTUAL_GATEWAY_MAC = "virtual-gateway-mac";
@@ -38,7 +38,7 @@ public class VRouterConfig extends Config<ApplicationId> {
 
     @Override
     public boolean isValid() {
-        return hasOnlyFields(FRR0_CONNECT_POINT,QUAGGA_MAC, QUAGGA_IP4, QUAGGA_IP6,
+        return hasOnlyFields(FRR0_CONNECT_POINT,FRR_ZERO_MAC, FRR_ZERO_IP4, FRR_ZERO_IP6,
                 VIRTUAL_GATEWAY_IP4, VIRTUAL_GATEWAY_IP6,
                 VIRTUAL_GATEWAY_MAC, EXTERNAL_PORT);
     }
@@ -58,8 +58,8 @@ public class VRouterConfig extends Config<ApplicationId> {
      *
      * @return MAC address or null if not configured
      */
-    public MacAddress quaggaMac() {
-        String mac = get(QUAGGA_MAC, null);
+    public MacAddress frr0Mac() {
+        String mac = get(FRR_ZERO_MAC, null);
         return mac != null ? MacAddress.valueOf(mac) : null;
     }
 
@@ -68,8 +68,8 @@ public class VRouterConfig extends Config<ApplicationId> {
      *
      * @return IPv4 address or null if not configured
      */
-    public Ip4Address quaggaIp4() {
-        String ip = get(QUAGGA_IP4, null);
+    public Ip4Address frr0Ip4() {
+        String ip = get(FRR_ZERO_IP4, null);
         return ip != null ? Ip4Address.valueOf(ip) : null;
     }
 
@@ -78,8 +78,8 @@ public class VRouterConfig extends Config<ApplicationId> {
      *
      * @return IPv6 address or null if not configured
      */
-    public Ip6Address quaggaIp6() {
-        String ip = get(QUAGGA_IP6, null);
+    public Ip6Address frr0Ip6() {
+        String ip = get(FRR_ZERO_IP6, null);
         return ip != null ? Ip6Address.valueOf(ip) : null;
     }
 

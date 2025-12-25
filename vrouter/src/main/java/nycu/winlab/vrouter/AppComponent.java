@@ -143,9 +143,9 @@ public class AppComponent {
     private MacAddress virtualGatewayMac;
 
     // Quagga/FRR router configuration (for default routing)
-    private MacAddress quaggaMac;
-    private Ip4Address quaggaIp4;
-    private Ip6Address quaggaIp6;
+    private MacAddress frr0Mac;
+    private Ip4Address frr0Ip4;
+    private Ip6Address frr0Ip6;
 
     // External port (interface port) where ARP/NDP should be dropped
     private ConnectPoint externalPort;
@@ -234,24 +234,24 @@ public class AppComponent {
             virtualGatewayIp4 = config.virtualGatewayIp4();
             virtualGatewayIp6 = config.virtualGatewayIp6();
             virtualGatewayMac = config.virtualGatewayMac();
-            quaggaMac = config.quaggaMac();
-            quaggaIp4 = config.quaggaIp4();
-            quaggaIp6 = config.quaggaIp6();
+            frr0Mac = config.frr0Mac();
+            frr0Ip4 = config.frr0Ip4();
+            frr0Ip6 = config.frr0Ip6();
             externalPort = config.externalPort();
             log.info("Loaded VRouter config: gateway-ip4={}, gateway-ip6={}, gateway-mac={}",
                     virtualGatewayIp4, virtualGatewayIp6, virtualGatewayMac);
-            log.info("Loaded Quagga config: quagga-mac={}, quagga-ip4={}, quagga-ip6={}",
-                    quaggaMac, quaggaIp4, quaggaIp6);
+            log.info("Loaded Quagga config: frr0-mac={}, frr0-ip4={}, frr0-ip6={}",
+                    frr0Mac, frr0Ip4, frr0Ip6);
             log.info("Loaded external port config: external-port={}", externalPort);
 
-            // Pre-populate quagga IP-MAC mappings for L3 routing
-            if (quaggaIp4 != null && quaggaMac != null && ipToMacTable != null) {
-                ipToMacTable.put(quaggaIp4, quaggaMac);
-                log.info("Pre-populated quagga IPv4 mapping: {} -> {}", quaggaIp4, quaggaMac);
+            // Pre-populate frr0 IP-MAC mappings for L3 routing
+            if (frr0Ip4 != null && frr0Mac != null && ipToMacTable != null) {
+                ipToMacTable.put(frr0Ip4, frr0Mac);
+                log.info("Pre-populated frr0 IPv4 mapping: {} -> {}", frr0Ip4, frr0Mac);
             }
-            if (quaggaIp6 != null && quaggaMac != null && ip6ToMacTable != null) {
-                ip6ToMacTable.put(quaggaIp6, quaggaMac);
-                log.info("Pre-populated quagga IPv6 mapping: {} -> {}", quaggaIp6, quaggaMac);
+            if (frr0Ip6 != null && frr0Mac != null && ip6ToMacTable != null) {
+                ip6ToMacTable.put(frr0Ip6, frr0Mac);
+                log.info("Pre-populated frr0 IPv6 mapping: {} -> {}", frr0Ip6, frr0Mac);
             }
         }
     }
@@ -618,10 +618,10 @@ public class AppComponent {
             // We found a MAC, either for the final destination or the next-hop router
             log.info("L3 IPv4 LOCAL/NEXT-HOP: Found MAC {}. Routing packet.", dstMac);
             routePacket(context, eth, dstMac);
-        } else if (quaggaMac != null) {
+        } else if (frr0Mac != null) {
             // Default route: forward to the pre-configured Quagga/FRR router
-            log.info("L3 IPv4 REMOTE: IP {} not in table. Forwarding to default quagga router (MAC={})", dstIp, quaggaMac);
-            routePacket(context, eth, quaggaMac);
+            log.info("L3 IPv4 REMOTE: IP {} not in table. Forwarding to default frr0 router (MAC={})", dstIp, frr0Mac);
+            routePacket(context, eth, frr0Mac);
         } else {
             // No route and no default, flood as a last resort
             log.warn("L3 IPv4: Cannot route to {}. No route, no MAC, and no default router configured.", dstIp);
@@ -674,10 +674,10 @@ public class AppComponent {
             // We found a MAC, either for the final destination or the next-hop router
             log.info("L3 IPv6 LOCAL/NEXT-HOP: Found MAC {}. Routing packet.", dstMac);
             routePacket(context, eth, dstMac);
-        } else if (quaggaMac != null) {
+        } else if (frr0Mac != null) {
             // Default route: forward to the pre-configured Quagga/FRR router
-            log.info("L3 IPv6 REMOTE: IP {} not in table. Forwarding to default quagga router (MAC={})", dstIp, quaggaMac);
-            routePacket(context, eth, quaggaMac);
+            log.info("L3 IPv6 REMOTE: IP {} not in table. Forwarding to default frr0 router (MAC={})", dstIp, frr0Mac);
+            routePacket(context, eth, frr0Mac);
         } else {
             // No route and no default, flood as a last resort
             log.warn("L3 IPv6: Cannot route to {}. No route, no MAC, and no default router configured.", dstIp);
