@@ -34,13 +34,13 @@ public class VRouterConfig extends Config<ApplicationId> {
     private static final String VIRTUAL_GATEWAY_IP4 = "virtual-gateway-ip4";
     private static final String VIRTUAL_GATEWAY_IP6 = "virtual-gateway-ip6";
     private static final String VIRTUAL_GATEWAY_MAC = "virtual-gateway-mac";
-    private static final String EXTERNAL_PORT = "external-port";
+    private static final String WAN_CONNECT_POINT = "wan-connect-point";
 
     @Override
     public boolean isValid() {
         return hasOnlyFields(FRR0_CONNECT_POINT,FRR_ZERO_MAC, FRR_ZERO_IP4, FRR_ZERO_IP6,
                 VIRTUAL_GATEWAY_IP4, VIRTUAL_GATEWAY_IP6,
-                VIRTUAL_GATEWAY_MAC, EXTERNAL_PORT);
+                VIRTUAL_GATEWAY_MAC, WAN_CONNECT_POINT);
     }
 
     /**
@@ -119,7 +119,7 @@ public class VRouterConfig extends Config<ApplicationId> {
      * @return ConnectPoint or null if not configured
      */
     public ConnectPoint externalPort() {
-        String port = get(EXTERNAL_PORT, null);
+        String port = get(WAN_CONNECT_POINT, null);
         return port != null ? ConnectPoint.deviceConnectPoint(port) : null;
     }
 }

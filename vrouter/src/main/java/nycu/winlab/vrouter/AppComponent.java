@@ -242,7 +242,7 @@ public class AppComponent {
                     virtualGatewayIp4, virtualGatewayIp6, virtualGatewayMac);
             log.info("Loaded Quagga config: frr0-mac={}, frr0-ip4={}, frr0-ip6={}",
                     frr0Mac, frr0Ip4, frr0Ip6);
-            log.info("Loaded external port config: external-port={}", externalPort);
+            log.info("Loaded external port config: wan-connect-point={}", externalPort);
 
             // Pre-populate frr0 IP-MAC mappings for L3 routing
             if (frr0Ip4 != null && frr0Mac != null && ipToMacTable != null) {
