@@ -4,7 +4,7 @@ The environment consists of two main Autonomous Systems (AS), an SDN controller,
 
 ## High-Level Overview
 
--   **Network ID**: Network ID used in this topology is `35`. Every reference to `xx` should be swapped with `35`, for example AS65xx0 means AS65350 if referring to this network.
+-   **Network ID**: This topology's network id is `35`. Every reference to `xx` refers to `35`. For example, AS65xx0 means AS65350.
 -   **AS65xx0**: An SDN-based network controlled by the ONOS vRouter application. It contains two hosts (`h1`, `h2`), two Open vSwitch (OVS) bridges (`ovs1`, `ovs2`), and a border router (`frr0`).
 -   **AS65xx1**: A traditionally routed network with one host (`h3`) and one router (`frr1`).
 -   **SDN Controller**: An `onos` instance that manages `ovs1`, `ovs2` and `ovs3`. It runs a custom `vrouter` application that provides L2/L3 services within AS65350.
