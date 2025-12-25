@@ -19,3 +19,4 @@ echo "vrouter app installed!"
 
 # Load vRouter configuration to ONOS
 onos-netcfg localhost config.json
+echo "vRouter configuration loaded!"

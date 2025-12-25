@@ -27,6 +27,7 @@ import org.onosproject.net.config.Config;
  */
 public class VRouterConfig extends Config<ApplicationId> {
 
+    private static final String FRR0_CONNECT_POINT = "frr0-connect-point";
     private static final String QUAGGA_MAC = "quagga-mac";
     private static final String QUAGGA_IP4 = "quagga-ip4";
     private static final String QUAGGA_IP6 = "quagga-ip6";
@@ -37,9 +38,19 @@ public class VRouterConfig extends Config<ApplicationId> {
 
     @Override
     public boolean isValid() {
-        return hasOnlyFields(QUAGGA_MAC, QUAGGA_IP4, QUAGGA_IP6,
+        return hasOnlyFields(FRR0_CONNECT_POINT,QUAGGA_MAC, QUAGGA_IP4, QUAGGA_IP6,
                 VIRTUAL_GATEWAY_IP4, VIRTUAL_GATEWAY_IP6,
                 VIRTUAL_GATEWAY_MAC, EXTERNAL_PORT);
+    }
+
+    /**
+     * Gets the FRR0 connect point.
+     *
+     * @return ConnectPoint or null if not configured
+     */    
+    public ConnectPoint frr0ConnectPoint() {
+        String port = get(FRR0_CONNECT_POINT, null);
+        return port != null ? ConnectPoint.deviceConnectPoint(port) : null;
     }
 
     /**
