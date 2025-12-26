@@ -163,6 +163,10 @@ public class AppComponent {
     private Ip4Address wanPeerIp4;        // AS65000 BGP speaker IP (192.168.70.253)
     private ConnectPoint frr0ConnectPoint; // Connect point where frr0 is connected
 
+    // WAN IPv6 peering configuration (for AS65000 BGP over IPv6)
+    private Ip6Address wanLocalIp6;       // frr0's IPv6 on WAN subnet (fd70::35)
+    private Ip6Address wanPeerIp6;        // AS65000 BGP speaker IPv6 (fd70::fe)
+
     private ConsistentMap<Ip4Address, MacAddress> ipToMacTable;
     private ConsistentMap<Ip6Address, MacAddress> ip6ToMacTable;
     private Map<DeviceId, Map<MacAddress, PortNumber>> bridgeTable = new HashMap<>();
@@ -291,6 +295,21 @@ public class AppComponent {
                 log.info("Pre-populated WAN local IPv4 mapping: {} -> {}", wanLocalIp4, frr0Mac);
             }
 
+            // Parse v6-peer to get WAN IPv6 local and peer addresses
+            List<String[]> v6Peers = config.v6Peers();
+            if (v6Peers != null && !v6Peers.isEmpty()) {
+                String[] peer = v6Peers.get(0);
+                wanLocalIp6 = Ip6Address.valueOf(peer[0]);
+                wanPeerIp6 = Ip6Address.valueOf(peer[1]);
+                log.info("Loaded WAN IPv6 peering config: local={}, peer={}", wanLocalIp6, wanPeerIp6);
+            }
+
+            // Pre-populate WAN local IPv6 -> frr0 MAC mapping
+            if (wanLocalIp6 != null && frr0Mac != null && ip6ToMacTable != null) {
+                ip6ToMacTable.put(wanLocalIp6, frr0Mac);
+                log.info("Pre-populated WAN local IPv6 mapping: {} -> {}", wanLocalIp6, frr0Mac);
+            }
+
             // Install WAN forwarding intents
             installWanForwardingIntents();
         }
@@ -370,9 +389,53 @@ public class AppComponent {
                 return;
             }
 
-            // Handle IPv6 packets (for NDP)
+            // Handle IPv6 packets
             if (eth.getEtherType() == Ethernet.TYPE_IPV6) {
+                ConnectPoint srcPoint = context.inPacket().receivedFrom();
                 IPv6 ipv6 = (IPv6) eth.getPayload();
+
+                // Handle traffic FROM WAN port (inbound)
+                if (externalPort != null && srcPoint.equals(externalPort)) {
+                    Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
+
+                    // Allow NDP (handled by handleWanNDP via handleNDP)
+                    if (ipv6.getNextHeader() == IPv6.PROTOCOL_ICMP6) {
+                        ICMP6 icmp6 = (ICMP6) ipv6.getPayload();
+                        byte type = icmp6.getIcmpType();
+                        if (type == ICMP6.NEIGHBOR_SOLICITATION || type == ICMP6.NEIGHBOR_ADVERTISEMENT) {
+                            handleNDP(context, eth);
+                            return;
+                        }
+                    }
+
+                    // Block non-NDP IPv6 not destined for frr0
+                    if (wanLocalIp6 == null || !dstIp.equals(wanLocalIp6)) {
+                        log.debug("Blocking WAN IPv6 not for frr0: dstIp={}", dstIp);
+                        return;
+                    }
+
+                    // Traffic to frr0's WAN IPv6 - forward to frr0
+                    if (frr0ConnectPoint != null) {
+                        log.info("Forwarding WAN IPv6 to frr0: {} -> {}", dstIp, frr0ConnectPoint);
+                        packetOut(frr0ConnectPoint, eth);
+                    }
+                    return;
+                }
+
+                // TODO: Review if this is necessary
+                // Handle traffic TO WAN port (outbound from frr0)
+                // if (wanPeerIp6 != null && frr0ConnectPoint != null && srcPoint.equals(frr0ConnectPoint)) {
+                //     Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
+
+                //     // Forward traffic destined to WAN peer to external port
+                //     if (dstIp.equals(wanPeerIp6)) {
+                //         log.info("Forwarding frr0 IPv6 to WAN peer {}: {} -> {}", wanPeerIp6, frr0ConnectPoint, externalPort);
+                //         packetOut(externalPort, eth);
+                //         return;
+                //     }
+                // }
+
+                // Handle NDP (Neighbor Solicitation and Advertisement)
                 if (ipv6.getNextHeader() == IPv6.PROTOCOL_ICMP6) {
                     ICMP6 icmp6 = (ICMP6) ipv6.getPayload();
                     byte type = icmp6.getIcmpType();
@@ -381,11 +444,13 @@ public class AppComponent {
                         return;
                     }
                 }
+
                 // Check if this is L3 routing (destination is our virtual gateway MAC)
                 if (virtualGatewayMac != null && eth.getDestinationMAC().equals(virtualGatewayMac)) {
                     handleL3RoutingIPv6(context, eth);
                     return;
                 }
+
                 // Handle other IPv6 traffic with learning bridge
                 handleLearningBridge(context, eth);
                 return;
@@ -572,12 +637,85 @@ public class AppComponent {
         }
     }
 
+    /**
+     * Handle NDP packets received from the WAN port (AS65000 side).
+     * - Block NDP not destined to frr0's WAN IPv6
+     * - Forward NDP Neighbor Advertisements to frr0
+     * - Send proxy NDP replies for Neighbor Solicitations targeting frr0's WAN IPv6
+     */
+    private void handleWanNDP(PacketContext context, Ethernet eth) {
+        IPv6 ipv6 = (IPv6) eth.getPayload();
+
+        // Verify this is an ICMP6 packet
+        if (ipv6.getNextHeader() != IPv6.PROTOCOL_ICMP6) {
+            log.debug("Dropping non-ICMP6 IPv6 from WAN port");
+            return;
+        }
+
+        ICMP6 icmp6 = (ICMP6) ipv6.getPayload();
+        byte type = icmp6.getIcmpType();
+
+        // Only handle NDP packets (NS and NA)
+        if (type != ICMP6.NEIGHBOR_SOLICITATION && type != ICMP6.NEIGHBOR_ADVERTISEMENT) {
+            log.debug("Dropping non-NDP ICMP6 from WAN port: type={}", type);
+            return;
+        }
+
+        MacAddress srcMac = eth.getSourceMAC();
+        MacAddress dstMac = eth.getDestinationMAC();
+        Ip6Address srcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
+
+        // Handle Neighbor Advertisement (response to our NS)
+        if (type == ICMP6.NEIGHBOR_ADVERTISEMENT) {
+            // Block NA if destination MAC is not frr0's MAC
+            if (frr0Mac == null || !dstMac.equals(frr0Mac)) {
+                log.debug("Blocking WAN Neighbor Advertisement not for frr0 MAC: dstMac={}", dstMac);
+                return;
+            }
+
+            // Learn WAN peer's IPv6 and MAC
+            ip6ToMacTable.put(srcIp, srcMac);
+            log.info("Learned WAN peer IPv6 MAC: {} -> {}", srcIp, srcMac);
+
+            // Forward NA to frr0 connect point
+            if (frr0ConnectPoint != null) {
+                log.info("Forwarding WAN Neighbor Advertisement to frr0 at {}", frr0ConnectPoint);
+                packetOut(frr0ConnectPoint, eth);
+            }
+            return;
+        }
+
+        // Handle Neighbor Solicitation (request from AS65000)
+        if (type == ICMP6.NEIGHBOR_SOLICITATION) {
+            NeighborSolicitation ns = (NeighborSolicitation) icmp6.getPayload();
+            byte[] targetBytes = ns.getTargetAddress();
+            Ip6Address targetIp = Ip6Address.valueOf(targetBytes);
+
+            // Block NS not destined to frr0's WAN IPv6
+            if (wanLocalIp6 == null || !targetIp.equals(wanLocalIp6)) {
+                log.debug("Blocking WAN Neighbor Solicitation not for frr0: targetIp={}", targetIp);
+                return;
+            }
+
+            // AS65000 is asking for frr0's WAN IPv6 MAC - send proxy NDP reply
+            log.info("WAN Neighbor Solicitation for {}. Replying with frr0 MAC {}", targetIp, frr0Mac);
+
+            // Learn the WAN peer's IPv6 and MAC from the NS
+            ip6ToMacTable.put(srcIp, srcMac);
+            log.info("Learned WAN peer IPv6 MAC from NS: {} -> {}", srcIp, srcMac);
+
+            Ethernet ndpReply = NeighborAdvertisement2.buildNdpAdv(targetIp, frr0Mac, eth);
+            packetOut(externalPort, ndpReply);
+            return;
+        }
+    }
+
     private void handleNDP(PacketContext context, Ethernet eth) {
         ConnectPoint srcPoint = context.inPacket().receivedFrom();
 
-        // Drop NDP packets from external/interface port
+        // Handle NDP packets from WAN port separately
         if (externalPort != null && srcPoint.equals(externalPort)) {
-            // log.info("Dropping NDP from external port: {}", srcPoint);
+            handleWanNDP(context, eth);
             return;
         }
 
@@ -1011,7 +1149,18 @@ public class AppComponent {
         intentService.submit(fromWanIntent);
         log.info("Installed WAN intent: AS65000 ({}) -> frr0 ({})", externalPort, frr0ConnectPoint);
 
-        log.info("WAN forwarding intents installed: frr0 <-> AS65000");
+        log.info("WAN IPv4 forwarding intents installed: frr0 <-> AS65000");
+
+        // Note: IPv6 WAN forwarding is handled by the packet processor (lines 397-423)
+        // We do not install intents for IPv6 WAN traffic because:
+        // 1. The frr0ConnectPoint (ovs1) and externalPort (ovs2) are on different switches
+        // 2. The veth link between ovs1 and ovs2 is not discovered by ONOS via LLDP
+        // 3. Intents fail to compile with "Unable to compile intent" error
+        // 4. The packet processor already correctly handles WAN IPv6 traffic using packetOut
+        if (wanPeerIp6 != null && wanLocalIp6 != null) {
+            log.info("WAN IPv6 peering configured: {} <-> {}", wanLocalIp6, wanPeerIp6);
+            log.info("WAN IPv6 traffic will be handled by packet processor (no intents)");
+        }
     }
 
 }

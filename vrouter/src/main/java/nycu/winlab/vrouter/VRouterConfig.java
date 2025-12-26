@@ -39,12 +39,13 @@ public class VRouterConfig extends Config<ApplicationId> {
     private static final String VIRTUAL_GATEWAY_MAC = "virtual-gateway-mac";
     private static final String WAN_CONNECT_POINT = "wan-connect-point";
     private static final String V4_PEER = "v4-peer";
+    private static final String V6_PEER = "v6-peer";
 
     @Override
     public boolean isValid() {
         return hasOnlyFields(FRR0_CONNECT_POINT, FRR_ZERO_MAC, FRR_ZERO_IP4, FRR_ZERO_IP6,
                 VIRTUAL_GATEWAY_IP4, VIRTUAL_GATEWAY_IP6,
-                VIRTUAL_GATEWAY_MAC, WAN_CONNECT_POINT, V4_PEER);
+                VIRTUAL_GATEWAY_MAC, WAN_CONNECT_POINT, V4_PEER, V6_PEER);
     }
 
     /**
@@ -141,6 +142,28 @@ public class VRouterConfig extends Config<ApplicationId> {
 
         // Get the array from config
         for (String peerEntry : getStringList(V4_PEER)) {
+            String[] parts = peerEntry.split(",");
+            if (parts.length == 2) {
+                peers.add(new String[]{parts[0].trim(), parts[1].trim()});
+            }
+        }
+        return peers;
+    }
+
+    /**
+     * Gets the list of IPv6 peer pairs (local IP, remote IP).
+     * Config format: ["fd70::35, fd70::fe"]
+     *
+     * @return List of String arrays [localIp, remoteIp], or empty list if not configured
+     */
+    public List<String[]> v6Peers() {
+        List<String[]> peers = new ArrayList<>();
+        if (!hasField(V6_PEER)) {
+            return peers;
+        }
+
+        // Get the array from config
+        for (String peerEntry : getStringList(V6_PEER)) {
             String[] parts = peerEntry.split(",");
             if (parts.length == 2) {
                 peers.add(new String[]{parts[0].trim(), parts[1].trim()});
