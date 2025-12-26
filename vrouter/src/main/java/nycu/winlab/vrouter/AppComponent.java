@@ -55,6 +55,10 @@ import org.onosproject.net.packet.PacketPriority;
 import org.onosproject.net.packet.PacketProcessor;
 import org.onosproject.net.edge.EdgePortService;
 import org.onosproject.net.intf.InterfaceService;
+import org.onosproject.net.intent.Intent;
+import org.onosproject.net.intent.IntentService;
+import org.onosproject.net.intent.PointToPointIntent;
+import org.onosproject.net.FilteredConnectPoint;
 import org.onosproject.net.config.ConfigFactory;
 import org.onosproject.net.config.NetworkConfigEvent;
 import org.onosproject.net.config.NetworkConfigListener;
@@ -78,6 +82,7 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -125,6 +130,9 @@ public class AppComponent {
     @Reference(cardinality = ReferenceCardinality.MANDATORY)
     protected RouteService routeService;
 
+    @Reference(cardinality = ReferenceCardinality.MANDATORY)
+    protected IntentService intentService;
+
     private final InternalConfigListener configListener = new InternalConfigListener();
     private final ConfigFactory<ApplicationId, VRouterConfig> configFactory =
             new ConfigFactory<ApplicationId, VRouterConfig>(
@@ -149,6 +157,11 @@ public class AppComponent {
 
     // External port (interface port) where ARP/NDP should be dropped
     private ConnectPoint externalPort;
+
+    // WAN peering configuration (for AS65000 BGP)
+    private Ip4Address wanLocalIp4;       // frr0's IP on WAN subnet (192.168.70.35)
+    private Ip4Address wanPeerIp4;        // AS65000 BGP speaker IP (192.168.70.253)
+    private ConnectPoint frr0ConnectPoint; // Connect point where frr0 is connected
 
     private ConsistentMap<Ip4Address, MacAddress> ipToMacTable;
     private ConsistentMap<Ip6Address, MacAddress> ip6ToMacTable;
@@ -203,6 +216,13 @@ public class AppComponent {
         configRegistry.removeListener(configListener);
         configRegistry.unregisterConfigFactory(configFactory);
 
+        // Withdraw all intents created by this app
+        for (Intent intent : intentService.getIntents()) {
+            if (intent.appId().equals(appId)) {
+                intentService.withdraw(intent);
+            }
+        }
+
         flowRuleService.removeFlowRulesById(appId);
 
         packetService.removeProcessor(processor);
@@ -238,11 +258,22 @@ public class AppComponent {
             frr0Ip4 = config.frr0Ip4();
             frr0Ip6 = config.frr0Ip6();
             externalPort = config.externalPort();
+            frr0ConnectPoint = config.frr0ConnectPoint();
             log.info("Loaded VRouter config: gateway-ip4={}, gateway-ip6={}, gateway-mac={}",
                     virtualGatewayIp4, virtualGatewayIp6, virtualGatewayMac);
             log.info("Loaded Quagga config: frr0-mac={}, frr0-ip4={}, frr0-ip6={}",
                     frr0Mac, frr0Ip4, frr0Ip6);
             log.info("Loaded external port config: wan-connect-point={}", externalPort);
+            log.info("Loaded frr0 connect point: {}", frr0ConnectPoint);
+
+            // Parse v4-peer to get WAN local and peer IPs
+            List<String[]> v4Peers = config.v4Peers();
+            if (v4Peers != null && !v4Peers.isEmpty()) {
+                String[] peer = v4Peers.get(0);
+                wanLocalIp4 = Ip4Address.valueOf(peer[0]);
+                wanPeerIp4 = Ip4Address.valueOf(peer[1]);
+                log.info("Loaded WAN peering config: local={}, peer={}", wanLocalIp4, wanPeerIp4);
+            }
 
             // Pre-populate frr0 IP-MAC mappings for L3 routing
             if (frr0Ip4 != null && frr0Mac != null && ipToMacTable != null) {
@@ -253,6 +284,15 @@ public class AppComponent {
                 ip6ToMacTable.put(frr0Ip6, frr0Mac);
                 log.info("Pre-populated frr0 IPv6 mapping: {} -> {}", frr0Ip6, frr0Mac);
             }
+
+            // Pre-populate WAN local IP -> frr0 MAC mapping
+            if (wanLocalIp4 != null && frr0Mac != null && ipToMacTable != null) {
+                ipToMacTable.put(wanLocalIp4, frr0Mac);
+                log.info("Pre-populated WAN local IPv4 mapping: {} -> {}", wanLocalIp4, frr0Mac);
+            }
+
+            // Install WAN forwarding intents
+            installWanForwardingIntents();
         }
     }
 
@@ -304,9 +344,25 @@ public class AppComponent {
 
             // Handle IPv4 packets
             if (eth.getEtherType() == Ethernet.TYPE_IPV4) {
+                ConnectPoint srcPoint = context.inPacket().receivedFrom();
+
+                // Block IPv4 from WAN port that isn't destined for frr0's WAN IP
+                if (externalPort != null && srcPoint.equals(externalPort)) {
+                    IPv4 ipv4 = (IPv4) eth.getPayload();
+                    Ip4Address dstIp = Ip4Address.valueOf(ipv4.getDestinationAddress());
+                    if (wanLocalIp4 == null || !dstIp.equals(wanLocalIp4)) {
+                        // Drop external IPv4 traffic not destined for frr0
+                        return;
+                    }
+                    // Traffic to frr0's WAN IP - forward to frr0
+                    if (frr0ConnectPoint != null) {
+                        packetOut(frr0ConnectPoint, eth);
+                    }
+                    return;
+                }
+
                 // Check if this is L3 routing (destination is our virtual gateway MAC)
                 if (virtualGatewayMac != null && eth.getDestinationMAC().equals(virtualGatewayMac)) {
-                    
                     handleL3RoutingIPv4(context, eth);
                     return;
                 }
@@ -386,9 +442,9 @@ public class AppComponent {
     private void handleARP(PacketContext context, Ethernet eth) {
         ConnectPoint srcPoint = context.inPacket().receivedFrom();
 
-        // Drop ARP packets from external/interface port
+        // Handle ARP packets from WAN port separately
         if (externalPort != null && srcPoint.equals(externalPort)) {
-            // log.info("Dropping ARP from external port: {}", srcPoint);
+            handleWanARP(context, eth);
             return;
         }
 
@@ -434,6 +490,13 @@ public class AppComponent {
                 return;
             }
 
+            // Check if ARP target is WAN peer IP - forward to WAN port
+            if (wanPeerIp4 != null && dstIp.equals(wanPeerIp4)) {
+                log.info("Forwarding ARP Request for WAN peer {} to WAN port", dstIp);
+                packetOut(externalPort, eth);
+                return;
+            }
+
             // Handle ProxyARP
             MacAddress cachedDstMac = ipToMacTable.asJavaMap().get(dstIp);
 
@@ -462,12 +525,59 @@ public class AppComponent {
         }
     }
 
+    /**
+     * Handle ARP packets received from the WAN port (AS65000 side).
+     * - Block ARP not destined to frr0's WAN IP
+     * - Forward ARP replies to frr0
+     * - Send proxy ARP replies for ARP requests targeting frr0's WAN IP
+     */
+    private void handleWanARP(PacketContext context, Ethernet eth) {
+        ARP arp = (ARP) eth.getPayload();
+        Ip4Address srcIp = Ip4Address.valueOf(arp.getSenderProtocolAddress());
+        Ip4Address dstIp = Ip4Address.valueOf(arp.getTargetProtocolAddress());
+        MacAddress srcMac = eth.getSourceMAC();
+        MacAddress dstMac = eth.getDestinationMAC();
+
+        if (arp.getOpCode() == ARP.OP_REPLY) {
+            // Block ARP reply if destination MAC is not frr0's MAC
+            if (frr0Mac == null || !dstMac.equals(frr0Mac)) {
+                log.debug("Blocking WAN ARP Reply not for frr0 MAC: dstMac={}", dstMac);
+                return;
+            }
+
+            // Learn WAN peer's MAC
+            ipToMacTable.put(srcIp, srcMac);
+            log.info("Learned WAN peer MAC: {} -> {}", srcIp, srcMac);
+
+            // Forward ARP reply to frr0 connect point
+            if (frr0ConnectPoint != null) {
+                log.info("Forwarding WAN ARP Reply to frr0 at {}", frr0ConnectPoint);
+                packetOut(frr0ConnectPoint, eth);
+            }
+            return;
+        }
+
+        // Block ARP request not destined to frr0's WAN IP
+        if (wanLocalIp4 == null || !dstIp.equals(wanLocalIp4)) {
+            log.debug("Blocking WAN ARP Request not for frr0: dstIp={}", dstIp);
+            return;
+        }
+
+        if (arp.getOpCode() == ARP.OP_REQUEST) {
+            // AS65000 is asking for frr0's WAN IP MAC - send proxy ARP reply
+            log.info("WAN ARP Request for {}. Replying with frr0 MAC {}", dstIp, frr0Mac);
+            Ethernet arpReply = buildArpReply(dstIp, frr0Mac, srcIp, srcMac);
+            packetOut(externalPort, arpReply);
+            return;
+        }
+    }
+
     private void handleNDP(PacketContext context, Ethernet eth) {
         ConnectPoint srcPoint = context.inPacket().receivedFrom();
 
         // Drop NDP packets from external/interface port
         if (externalPort != null && srcPoint.equals(externalPort)) {
-            log.info("Dropping NDP from external port: {}", srcPoint);
+            // log.info("Dropping NDP from external port: {}", srcPoint);
             return;
         }
 
@@ -551,14 +661,14 @@ public class AppComponent {
             MacAddress cachedDstMac = ip6ToMacTable.asJavaMap().get(targetIp);
 
             if (cachedDstMac != null) {
-                log.info("NDP TABLE HIT. Requested MAC = {}", cachedDstMac);
+                // log.info("NDP TABLE HIT. Requested MAC = {}", cachedDstMac);
 
                 Ethernet ndpAdv = NeighborAdvertisement2.buildNdpAdv(targetIp, cachedDstMac, context.inPacket().parsed());
                 ConnectPoint outCp = context.inPacket().receivedFrom();
 
                 packetOut(outCp, ndpAdv);
             } else {
-                log.info("NDP TABLE MISS. Send NDP Solicitation to edge ports");
+                // log.info("NDP TABLE MISS. Send NDP Solicitation to edge ports");
 
                 Iterable<ConnectPoint> edgePoints = edgePortService.getEdgePoints();
 
@@ -853,6 +963,55 @@ public class AppComponent {
         flowRuleService.applyFlowRules(flowRule);
 
         packetOut(context, portNumber);
+    }
+
+    /**
+     * Install PointToPointIntent for IPv4 forwarding between frr0 and AS65000.
+     * Creates bidirectional intents for BGP traffic.
+     */
+    private void installWanForwardingIntents() {
+        if (wanPeerIp4 == null || wanLocalIp4 == null || externalPort == null || frr0ConnectPoint == null) {
+            log.info("WAN forwarding intents not installed: missing configuration");
+            return;
+        }
+
+        // Intent 1: frr0 -> AS65000 (traffic to WAN peer)
+        TrafficSelector toWanSelector = DefaultTrafficSelector.builder()
+                .matchEthType(Ethernet.TYPE_IPV4)
+                .matchIPDst(IpPrefix.valueOf(wanPeerIp4, 32))
+                .build();
+
+        PointToPointIntent toWanIntent = PointToPointIntent.builder()
+                .appId(appId)
+                .selector(toWanSelector)
+                .treatment(DefaultTrafficTreatment.builder().build())
+                .filteredIngressPoint(new FilteredConnectPoint(frr0ConnectPoint))
+                .filteredEgressPoint(new FilteredConnectPoint(externalPort))
+                .priority(50000)
+                .build();
+
+        intentService.submit(toWanIntent);
+        log.info("Installed WAN intent: frr0 ({}) -> AS65000 ({})", frr0ConnectPoint, externalPort);
+
+        // Intent 2: AS65000 -> frr0 (traffic from WAN peer to frr0's WAN IP)
+        TrafficSelector fromWanSelector = DefaultTrafficSelector.builder()
+                .matchEthType(Ethernet.TYPE_IPV4)
+                .matchIPDst(IpPrefix.valueOf(wanLocalIp4, 32))
+                .build();
+
+        PointToPointIntent fromWanIntent = PointToPointIntent.builder()
+                .appId(appId)
+                .selector(fromWanSelector)
+                .treatment(DefaultTrafficTreatment.builder().build())
+                .filteredIngressPoint(new FilteredConnectPoint(externalPort))
+                .filteredEgressPoint(new FilteredConnectPoint(frr0ConnectPoint))
+                .priority(50000)
+                .build();
+
+        intentService.submit(fromWanIntent);
+        log.info("Installed WAN intent: AS65000 ({}) -> frr0 ({})", externalPort, frr0ConnectPoint);
+
+        log.info("WAN forwarding intents installed: frr0 <-> AS65000");
     }
 
 }

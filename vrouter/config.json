@@ -9,7 +9,10 @@
         "virtual-gateway-ip4": "172.16.35.1",
         "virtual-gateway-ip6": "2a0b:4e07:c4:35::1",
         "virtual-gateway-mac": "00:00:00:00:00:02",
-        "wan-connect-point": "of:0000ceaa83f3a445/3"
+        "wan-connect-point": "of:0000ceaa83f3a445/3",
+        "v4-peer": [
+          "192.168.70.35, 192.168.70.253"
+        ]
       }
     }
   },

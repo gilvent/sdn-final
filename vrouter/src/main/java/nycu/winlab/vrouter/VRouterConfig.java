@@ -22,6 +22,9 @@ import org.onosproject.core.ApplicationId;
 import org.onosproject.net.ConnectPoint;
 import org.onosproject.net.config.Config;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * Configuration for the VRouter application.
  */
@@ -35,12 +38,13 @@ public class VRouterConfig extends Config<ApplicationId> {
     private static final String VIRTUAL_GATEWAY_IP6 = "virtual-gateway-ip6";
     private static final String VIRTUAL_GATEWAY_MAC = "virtual-gateway-mac";
     private static final String WAN_CONNECT_POINT = "wan-connect-point";
+    private static final String V4_PEER = "v4-peer";
 
     @Override
     public boolean isValid() {
-        return hasOnlyFields(FRR0_CONNECT_POINT,FRR_ZERO_MAC, FRR_ZERO_IP4, FRR_ZERO_IP6,
+        return hasOnlyFields(FRR0_CONNECT_POINT, FRR_ZERO_MAC, FRR_ZERO_IP4, FRR_ZERO_IP6,
                 VIRTUAL_GATEWAY_IP4, VIRTUAL_GATEWAY_IP6,
-                VIRTUAL_GATEWAY_MAC, WAN_CONNECT_POINT);
+                VIRTUAL_GATEWAY_MAC, WAN_CONNECT_POINT, V4_PEER);
     }
 
     /**
@@ -121,5 +125,35 @@ public class VRouterConfig extends Config<ApplicationId> {
     public ConnectPoint externalPort() {
         String port = get(WAN_CONNECT_POINT, null);
         return port != null ? ConnectPoint.deviceConnectPoint(port) : null;
+    }
+
+    /**
+     * Gets the list of IPv4 peer pairs (local IP, remote IP).
+     * Config format: ["192.168.70.35, 192.168.70.253"]
+     *
+     * @return List of String arrays [localIp, remoteIp], or empty list if not configured
+     */
+    public List<String[]> v4Peers() {
+        List<String[]> peers = new ArrayList<>();
+        if (!hasField(V4_PEER)) {
+            return peers;
+        }
+
+        // Get the array from config
+        for (String peerEntry : getStringList(V4_PEER)) {
+            String[] parts = peerEntry.split(",");
+            if (parts.length == 2) {
+                peers.add(new String[]{parts[0].trim(), parts[1].trim()});
+            }
+        }
+        return peers;
+    }
+
+    private List<String> getStringList(String key) {
+        List<String> result = new ArrayList<>();
+        if (node.has(key) && node.get(key).isArray()) {
+            node.get(key).forEach(item -> result.add(item.asText()));
+        }
+        return result;
     }
 }
