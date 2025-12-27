@@ -42,6 +42,7 @@ The environment consists of two main Autonomous Systems (AS), an SDN controller,
 -   **ovs3**: Connects AS65000.
 -   **Link**: `ovs1` and `ovs2` are connected by a `veth` pair (`ovs1-ovs2-veth`, `ovs2-ovs1-veth`).
 -   **Tunnel Link**: `ovs2` and `ovs3` are connected via VXLAN on top of Wireguard tunnel
+-   **Peer VXLAN**: `ovs2` are connected to Peer's `ovs2` through dedicated VXLAN
 
 #### Hosts
 
