@@ -81,6 +81,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -162,10 +163,15 @@ public class AppComponent {
     private Ip4Address wanLocalIp4;       // frr0's IP on WAN subnet (192.168.70.35)
     private Ip4Address wanPeerIp4;        // AS65000 BGP speaker IP (192.168.70.253)
     private ConnectPoint frr0ConnectPoint; // Connect point where frr0 is connected
+    private ConnectPoint frr1ConnectPoint; // Connect point where frr1 is connected
 
     // WAN IPv6 peering configuration (for AS65000 BGP over IPv6)
     private Ip6Address wanLocalIp6;       // frr0's IPv6 on WAN subnet (fd70::35)
     private Ip6Address wanPeerIp6;        // AS65000 BGP speaker IPv6 (fd70::fe)
+
+    // Internal IPv6 peer configuration (for inter-AS BGP, e.g., frr0 <-> frr1)
+    // Stores pairs of [localIp, peerIp] for internal BGP peering
+    private List<Ip6Address[]> internalV6Peers = new ArrayList<>();
 
     private ConsistentMap<Ip4Address, MacAddress> ipToMacTable;
     private ConsistentMap<Ip6Address, MacAddress> ip6ToMacTable;
@@ -263,12 +269,14 @@ public class AppComponent {
             frr0Ip6 = config.frr0Ip6();
             externalPort = config.externalPort();
             frr0ConnectPoint = config.frr0ConnectPoint();
+            frr1ConnectPoint = config.frr1ConnectPoint();
             log.info("Loaded VRouter config: gateway-ip4={}, gateway-ip6={}, gateway-mac={}",
                     virtualGatewayIp4, virtualGatewayIp6, virtualGatewayMac);
             log.info("Loaded Quagga config: frr0-mac={}, frr0-ip4={}, frr0-ip6={}",
                     frr0Mac, frr0Ip4, frr0Ip6);
             log.info("Loaded external port config: wan-connect-point={}", externalPort);
             log.info("Loaded frr0 connect point: {}", frr0ConnectPoint);
+            log.info("Loaded frr1 connect point: {}", frr1ConnectPoint);
 
             // Parse v4-peer to get WAN local and peer IPs
             List<String[]> v4Peers = config.v4Peers();
@@ -296,12 +304,26 @@ public class AppComponent {
             }
 
             // Parse v6-peer to get WAN IPv6 local and peer addresses
+            // First entry is WAN peering (AS65000), subsequent entries are internal peers
             List<String[]> v6Peers = config.v6Peers();
             if (v6Peers != null && !v6Peers.isEmpty()) {
+                // First entry: WAN peering (fd70::35 <-> fd70::fe)
                 String[] peer = v6Peers.get(0);
                 wanLocalIp6 = Ip6Address.valueOf(peer[0]);
                 wanPeerIp6 = Ip6Address.valueOf(peer[1]);
                 log.info("Loaded WAN IPv6 peering config: local={}, peer={}", wanLocalIp6, wanPeerIp6);
+
+                // Clear previous internal peers
+                internalV6Peers.clear();
+
+                // Subsequent entries: internal peers (e.g., fd63::1 <-> fd63::2)
+                for (int i = 1; i < v6Peers.size(); i++) {
+                    String[] internalPeer = v6Peers.get(i);
+                    Ip6Address localIp = Ip6Address.valueOf(internalPeer[0]);
+                    Ip6Address peerIp = Ip6Address.valueOf(internalPeer[1]);
+                    internalV6Peers.add(new Ip6Address[]{localIp, peerIp});
+                    log.info("Loaded internal IPv6 peering config: local={}, peer={}", localIp, peerIp);
+                }
             }
 
             // Pre-populate WAN local IPv6 -> frr0 MAC mapping
@@ -310,8 +332,20 @@ public class AppComponent {
                 log.info("Pre-populated WAN local IPv6 mapping: {} -> {}", wanLocalIp6, frr0Mac);
             }
 
+            // Pre-populate internal peer IPv6 -> frr0 MAC mapping (for frr0's internal IPs)
+            for (Ip6Address[] peerPair : internalV6Peers) {
+                Ip6Address localIp = peerPair[0];
+                if (frr0Mac != null && ip6ToMacTable != null) {
+                    ip6ToMacTable.put(localIp, frr0Mac);
+                    log.info("Pre-populated internal IPv6 mapping: {} -> {}", localIp, frr0Mac);
+                }
+            }
+
             // Install WAN forwarding intents
             installWanForwardingIntents();
+
+            // Install internal peer forwarding intents
+            installInternalPeerForwardingIntents();
         }
     }
 
@@ -1160,6 +1194,69 @@ public class AppComponent {
         if (wanPeerIp6 != null && wanLocalIp6 != null) {
             log.info("WAN IPv6 peering configured: {} <-> {}", wanLocalIp6, wanPeerIp6);
             log.info("WAN IPv6 traffic will be handled by packet processor (no intents)");
+        }
+    }
+
+    /**
+     * Install bidirectional PointToPointIntents for internal IPv6 peer traffic.
+     * This enables BGP communication between frr0 and frr1 on the fd63::/64 network.
+     */
+    private void installInternalPeerForwardingIntents() {
+        // TODO: Implement similar intents for IPv4 internal peers if needed
+        if (internalV6Peers.isEmpty()) {
+            log.info("No internal IPv6 peers configured");
+            return;
+        }
+
+        if (frr0ConnectPoint == null || frr1ConnectPoint == null) {
+            log.warn("Cannot install internal peer intents: frr0ConnectPoint={}, frr1ConnectPoint={}",
+                    frr0ConnectPoint, frr1ConnectPoint);
+            return;
+        }
+
+        for (Ip6Address[] peerPair : internalV6Peers) {
+            Ip6Address frr0InternalIp = peerPair[0];  // fd63::1
+            Ip6Address frr1InternalIp = peerPair[1];  // fd63::2
+
+            // Intent 1: Traffic to frr0's internal IP (fd63::1)
+            TrafficSelector toFrr0Selector = DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV6)
+                    .matchIPv6Dst(IpPrefix.valueOf(frr0InternalIp, 128))
+                    .build();
+
+            PointToPointIntent toFrr0Intent = PointToPointIntent.builder()
+                    .appId(appId)
+                    .selector(toFrr0Selector)
+                    .treatment(DefaultTrafficTreatment.builder().build())
+                    .filteredIngressPoint(new FilteredConnectPoint(frr1ConnectPoint))
+                    .filteredEgressPoint(new FilteredConnectPoint(frr0ConnectPoint))
+                    .priority(45000)
+                    .build();
+
+            intentService.submit(toFrr0Intent);
+            log.info("Installed internal peer intent: to {} via {} -> {}",
+                    frr0InternalIp, frr1ConnectPoint, frr0ConnectPoint);
+
+            // Intent 2: Traffic to frr1's internal IP (fd63::2)
+            TrafficSelector toFrr1Selector = DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV6)
+                    .matchIPv6Dst(IpPrefix.valueOf(frr1InternalIp, 128))
+                    .build();
+
+            PointToPointIntent toFrr1Intent = PointToPointIntent.builder()
+                    .appId(appId)
+                    .selector(toFrr1Selector)
+                    .treatment(DefaultTrafficTreatment.builder().build())
+                    .filteredIngressPoint(new FilteredConnectPoint(frr0ConnectPoint))
+                    .filteredEgressPoint(new FilteredConnectPoint(frr1ConnectPoint))
+                    .priority(45000)
+                    .build();
+
+            intentService.submit(toFrr1Intent);
+            log.info("Installed internal peer intent: to {} via {} -> {}",
+                    frr1InternalIp, frr0ConnectPoint, frr1ConnectPoint);
+
+            log.info("Internal IPv6 BGP forwarding enabled: {} <-> {}", frr0InternalIp, frr1InternalIp);
         }
     }
 

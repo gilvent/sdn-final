@@ -31,6 +31,7 @@ import java.util.List;
 public class VRouterConfig extends Config<ApplicationId> {
 
     private static final String FRR0_CONNECT_POINT = "frr0-connect-point";
+    private static final String FRR1_CONNECT_POINT = "frr1-connect-point";
     private static final String FRR_ZERO_MAC = "frr0-mac";
     private static final String FRR_ZERO_IP4 = "frr0-ip4";
     private static final String FRR_ZERO_IP6 = "frr0-ip6";
@@ -43,7 +44,7 @@ public class VRouterConfig extends Config<ApplicationId> {
 
     @Override
     public boolean isValid() {
-        return hasOnlyFields(FRR0_CONNECT_POINT, FRR_ZERO_MAC, FRR_ZERO_IP4, FRR_ZERO_IP6,
+        return hasOnlyFields(FRR0_CONNECT_POINT, FRR1_CONNECT_POINT, FRR_ZERO_MAC, FRR_ZERO_IP4, FRR_ZERO_IP6,
                 VIRTUAL_GATEWAY_IP4, VIRTUAL_GATEWAY_IP6,
                 VIRTUAL_GATEWAY_MAC, WAN_CONNECT_POINT, V4_PEER, V6_PEER);
     }
@@ -52,9 +53,19 @@ public class VRouterConfig extends Config<ApplicationId> {
      * Gets the FRR0 connect point.
      *
      * @return ConnectPoint or null if not configured
-     */    
+     */
     public ConnectPoint frr0ConnectPoint() {
         String port = get(FRR0_CONNECT_POINT, null);
+        return port != null ? ConnectPoint.deviceConnectPoint(port) : null;
+    }
+
+    /**
+     * Gets the FRR1 connect point.
+     *
+     * @return ConnectPoint or null if not configured
+     */
+    public ConnectPoint frr1ConnectPoint() {
+        String port = get(FRR1_CONNECT_POINT, null);
         return port != null ? ConnectPoint.deviceConnectPoint(port) : null;
     }
 
