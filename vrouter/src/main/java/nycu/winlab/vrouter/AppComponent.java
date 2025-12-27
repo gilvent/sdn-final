@@ -456,18 +456,17 @@ public class AppComponent {
                     return;
                 }
 
-                // TODO: Review if this is necessary
                 // Handle traffic TO WAN port (outbound from frr0)
-                // if (wanPeerIp6 != null && frr0ConnectPoint != null && srcPoint.equals(frr0ConnectPoint)) {
-                //     Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
+                if (wanPeerIp6 != null && frr0ConnectPoint != null && srcPoint.equals(frr0ConnectPoint)) {
+                    Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
 
-                //     // Forward traffic destined to WAN peer to external port
-                //     if (dstIp.equals(wanPeerIp6)) {
-                //         log.info("Forwarding frr0 IPv6 to WAN peer {}: {} -> {}", wanPeerIp6, frr0ConnectPoint, externalPort);
-                //         packetOut(externalPort, eth);
-                //         return;
-                //     }
-                // }
+                    // Forward traffic destined to WAN peer to external port
+                    if (dstIp.equals(wanPeerIp6)) {
+                        log.info("Forwarding frr0 IPv6 to WAN peer {}: {} -> {}", wanPeerIp6, frr0ConnectPoint, externalPort);
+                        packetOut(externalPort, eth);
+                        return;
+                    }
+                }
 
                 // Handle NDP (Neighbor Solicitation and Advertisement)
                 if (ipv6.getNextHeader() == IPv6.PROTOCOL_ICMP6) {
