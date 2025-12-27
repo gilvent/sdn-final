@@ -173,6 +173,12 @@ public class AppComponent {
     // Stores pairs of [localIp, peerIp] for internal BGP peering
     private List<Ip6Address[]> internalV6Peers = new ArrayList<>();
 
+    // Peer network configuration (for AS65340 and AS65360 BGP peering)
+    private ConnectPoint frr34ConnectPoint;  // VXLAN port for AS65340 (192.168.70.34)
+    private ConnectPoint frr36ConnectPoint;  // VXLAN port for AS65360 (192.168.70.36)
+    // Stores pairs of [localIp, peerIp] for peer network BGP peering
+    private List<Ip4Address[]> peerNetworkV4Peers = new ArrayList<>();
+
     private ConsistentMap<Ip4Address, MacAddress> ipToMacTable;
     private ConsistentMap<Ip6Address, MacAddress> ip6ToMacTable;
     private Map<DeviceId, Map<MacAddress, PortNumber>> bridgeTable = new HashMap<>();
@@ -270,6 +276,8 @@ public class AppComponent {
             externalPort = config.externalPort();
             frr0ConnectPoint = config.frr0ConnectPoint();
             frr1ConnectPoint = config.frr1ConnectPoint();
+            frr34ConnectPoint = config.frr34ConnectPoint();
+            frr36ConnectPoint = config.frr36ConnectPoint();
             log.info("Loaded VRouter config: gateway-ip4={}, gateway-ip6={}, gateway-mac={}",
                     virtualGatewayIp4, virtualGatewayIp6, virtualGatewayMac);
             log.info("Loaded Quagga config: frr0-mac={}, frr0-ip4={}, frr0-ip6={}",
@@ -277,14 +285,30 @@ public class AppComponent {
             log.info("Loaded external port config: wan-connect-point={}", externalPort);
             log.info("Loaded frr0 connect point: {}", frr0ConnectPoint);
             log.info("Loaded frr1 connect point: {}", frr1ConnectPoint);
+            log.info("Loaded frr34 connect point: {}", frr34ConnectPoint);
+            log.info("Loaded frr36 connect point: {}", frr36ConnectPoint);
 
             // Parse v4-peer to get WAN local and peer IPs
+            // First entry is WAN peering (AS65000), subsequent entries are peer networks
             List<String[]> v4Peers = config.v4Peers();
             if (v4Peers != null && !v4Peers.isEmpty()) {
+                // First entry: WAN peering (192.168.70.35 <-> 192.168.70.253)
                 String[] peer = v4Peers.get(0);
                 wanLocalIp4 = Ip4Address.valueOf(peer[0]);
                 wanPeerIp4 = Ip4Address.valueOf(peer[1]);
                 log.info("Loaded WAN peering config: local={}, peer={}", wanLocalIp4, wanPeerIp4);
+
+                // Clear previous peer network peers
+                peerNetworkV4Peers.clear();
+
+                // Subsequent entries: peer networks (e.g., AS65340 and AS65360)
+                for (int i = 1; i < v4Peers.size(); i++) {
+                    String[] peerNetEntry = v4Peers.get(i);
+                    Ip4Address localIp = Ip4Address.valueOf(peerNetEntry[0]);
+                    Ip4Address peerIp = Ip4Address.valueOf(peerNetEntry[1]);
+                    peerNetworkV4Peers.add(new Ip4Address[]{localIp, peerIp});
+                    log.info("Loaded peer network config: local={}, peer={}", localIp, peerIp);
+                }
             }
 
             // Pre-populate frr0 IP-MAC mappings for L3 routing
@@ -346,6 +370,9 @@ public class AppComponent {
 
             // Install internal peer forwarding intents
             installInternalPeerForwardingIntents();
+
+            // Install peer network forwarding intents (AS65340 and AS65360)
+            installPeerNetworkForwardingIntents();
         }
     }
 
@@ -409,6 +436,24 @@ public class AppComponent {
                     }
                     // Traffic to frr0's WAN IP - forward to frr0
                     if (frr0ConnectPoint != null) {
+                        packetOut(frr0ConnectPoint, eth);
+                    }
+                    return;
+                }
+
+                // Block IPv4 from peer network VXLAN ports that isn't destined for frr0's WAN IP
+                if ((frr34ConnectPoint != null && srcPoint.equals(frr34ConnectPoint)) ||
+                    (frr36ConnectPoint != null && srcPoint.equals(frr36ConnectPoint))) {
+                    IPv4 ipv4 = (IPv4) eth.getPayload();
+                    Ip4Address dstIp = Ip4Address.valueOf(ipv4.getDestinationAddress());
+                    if (wanLocalIp4 == null || !dstIp.equals(wanLocalIp4)) {
+                        // Drop peer network IPv4 traffic not destined for frr0
+                        log.debug("Blocking peer network IPv4 not for frr0: dstIp={}", dstIp);
+                        return;
+                    }
+                    // Traffic to frr0's WAN IP - forward to frr0
+                    if (frr0ConnectPoint != null) {
+                        log.info("Forwarding peer network IPv4 to frr0: {} -> {}", dstIp, frr0ConnectPoint);
                         packetOut(frr0ConnectPoint, eth);
                     }
                     return;
@@ -543,6 +588,13 @@ public class AppComponent {
         // Handle ARP packets from WAN port separately
         if (externalPort != null && srcPoint.equals(externalPort)) {
             handleWanARP(context, eth);
+            return;
+        }
+
+        // Handle ARP packets from peer network VXLAN ports (AS65340 and AS65360)
+        if ((frr34ConnectPoint != null && srcPoint.equals(frr34ConnectPoint)) ||
+            (frr36ConnectPoint != null && srcPoint.equals(frr36ConnectPoint))) {
+            handlePeerNetworkARP(context, eth);
             return;
         }
 
@@ -1256,6 +1308,133 @@ public class AppComponent {
                     frr1InternalIp, frr0ConnectPoint, frr1ConnectPoint);
 
             log.info("Internal IPv6 BGP forwarding enabled: {} <-> {}", frr0InternalIp, frr1InternalIp);
+        }
+    }
+
+    /**
+     * Handle ARP packets received from peer network VXLAN ports (AS65340 and AS65360).
+     * - Block ARP not destined to frr0's WAN IP (192.168.70.35)
+     * - Forward ARP replies to frr0
+     * - Send proxy ARP replies for ARP requests targeting frr0's WAN IP
+     */
+    private void handlePeerNetworkARP(PacketContext context, Ethernet eth) {
+        ConnectPoint srcPoint = context.inPacket().receivedFrom();
+        ARP arp = (ARP) eth.getPayload();
+        Ip4Address srcIp = Ip4Address.valueOf(arp.getSenderProtocolAddress());
+        Ip4Address dstIp = Ip4Address.valueOf(arp.getTargetProtocolAddress());
+        MacAddress srcMac = eth.getSourceMAC();
+        MacAddress dstMac = eth.getDestinationMAC();
+
+        if (arp.getOpCode() == ARP.OP_REPLY) {
+            // Block ARP reply if destination MAC is not frr0's MAC
+            if (frr0Mac == null || !dstMac.equals(frr0Mac)) {
+                log.debug("Blocking peer network ARP Reply not for frr0 MAC: dstMac={}", dstMac);
+                return;
+            }
+
+            // Learn peer network's MAC
+            ipToMacTable.put(srcIp, srcMac);
+            log.info("Learned peer network MAC: {} -> {}", srcIp, srcMac);
+
+            // Forward ARP reply to frr0 connect point
+            if (frr0ConnectPoint != null) {
+                log.info("Forwarding peer network ARP Reply to frr0 at {}", frr0ConnectPoint);
+                packetOut(frr0ConnectPoint, eth);
+            }
+            return;
+        }
+
+        // Block ARP request not destined to frr0's WAN IP
+        if (wanLocalIp4 == null || !dstIp.equals(wanLocalIp4)) {
+            log.debug("Blocking peer network ARP Request not for frr0: dstIp={}", dstIp);
+            return;
+        }
+
+        if (arp.getOpCode() == ARP.OP_REQUEST) {
+            // Peer network is asking for frr0's WAN IP MAC - send proxy ARP reply
+            log.info("Peer network ARP Request for {} from {}. Replying with frr0 MAC {}",
+                    dstIp, srcPoint, frr0Mac);
+            Ethernet arpReply = buildArpReply(dstIp, frr0Mac, srcIp, srcMac);
+            packetOut(srcPoint, arpReply);
+            return;
+        }
+    }
+
+    /**
+     * Install bidirectional PointToPointIntents for peer network IPv4 traffic.
+     * This enables BGP communication between frr0 and peer networks (AS65340 and AS65360).
+     */
+    private void installPeerNetworkForwardingIntents() {
+        if (peerNetworkV4Peers.isEmpty()) {
+            log.info("No peer network IPv4 peers configured");
+            return;
+        }
+
+        if (frr0ConnectPoint == null) {
+            log.warn("Cannot install peer network intents: frr0ConnectPoint is null");
+            return;
+        }
+
+        // Map peer IPs to their connect points
+        Map<Ip4Address, ConnectPoint> peerToConnectPoint = new HashMap<>();
+        if (frr34ConnectPoint != null && peerNetworkV4Peers.size() > 0) {
+            // First peer network entry is AS65340 (192.168.70.34)
+            peerToConnectPoint.put(peerNetworkV4Peers.get(0)[1], frr34ConnectPoint);
+        }
+        if (frr36ConnectPoint != null && peerNetworkV4Peers.size() > 1) {
+            // Second peer network entry is AS65360 (192.168.70.36)
+            peerToConnectPoint.put(peerNetworkV4Peers.get(1)[1], frr36ConnectPoint);
+        }
+
+        for (Ip4Address[] peerPair : peerNetworkV4Peers) {
+            Ip4Address localIp = peerPair[0];   // frr0's WAN IP (192.168.70.35)
+            Ip4Address peerIp = peerPair[1];    // Peer network IP (192.168.70.34 or 192.168.70.36)
+
+            ConnectPoint peerConnectPoint = peerToConnectPoint.get(peerIp);
+            if (peerConnectPoint == null) {
+                log.warn("No connect point configured for peer IP {}", peerIp);
+                continue;
+            }
+
+            // Intent 1: frr0 -> peer network (traffic to peer IP)
+            TrafficSelector toPeerSelector = DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV4)
+                    .matchIPDst(IpPrefix.valueOf(peerIp, 32))
+                    .build();
+
+            PointToPointIntent toPeerIntent = PointToPointIntent.builder()
+                    .appId(appId)
+                    .selector(toPeerSelector)
+                    .treatment(DefaultTrafficTreatment.builder().build())
+                    .filteredIngressPoint(new FilteredConnectPoint(frr0ConnectPoint))
+                    .filteredEgressPoint(new FilteredConnectPoint(peerConnectPoint))
+                    .priority(50000)
+                    .build();
+
+            intentService.submit(toPeerIntent);
+            log.info("Installed peer network intent: frr0 ({}) -> peer {} ({})",
+                    frr0ConnectPoint, peerIp, peerConnectPoint);
+
+            // Intent 2: peer network -> frr0 (traffic from peer to frr0's WAN IP)
+            TrafficSelector fromPeerSelector = DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV4)
+                    .matchIPDst(IpPrefix.valueOf(localIp, 32))
+                    .build();
+
+            PointToPointIntent fromPeerIntent = PointToPointIntent.builder()
+                    .appId(appId)
+                    .selector(fromPeerSelector)
+                    .treatment(DefaultTrafficTreatment.builder().build())
+                    .filteredIngressPoint(new FilteredConnectPoint(peerConnectPoint))
+                    .filteredEgressPoint(new FilteredConnectPoint(frr0ConnectPoint))
+                    .priority(50000)
+                    .build();
+
+            intentService.submit(fromPeerIntent);
+            log.info("Installed peer network intent: peer {} ({}) -> frr0 ({})",
+                    peerIp, peerConnectPoint, frr0ConnectPoint);
+
+            log.info("Peer network IPv4 BGP forwarding enabled: {} <-> {}", localIp, peerIp);
         }
     }
 

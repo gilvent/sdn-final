@@ -121,6 +121,14 @@ ovs-vsctl add-port ovs2 TO_TA_VXLAN -- set interface TO_TA_VXLAN type=vxlan \
     options:remote_ip=192.168.60.35 \
     options:local_ip=192.168.61.35
 
+ovs-vsctl add-port ovs2 TO_34_VXLAN -- set interface TO_34_VXLAN type=vxlan \
+    options:remote_ip=192.168.61.34 \
+    options:local_ip=192.168.61.35
+
+ovs-vsctl add-port ovs2 TO_36_VXLAN -- set interface TO_36_VXLAN type=vxlan \
+    options:remote_ip=192.168.61.36 \
+    options:local_ip=192.168.61.35
+
 
 # --- 6. Intra AS65351 Connection (r1 <-> h3) ---
 # This is a direct Docker link to simulate a simple link without OVS intermediary

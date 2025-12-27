@@ -19,6 +19,8 @@ ovs-vsctl del-port ovs1 ovs1-ovs2-veth > /dev/null 2>&1 || true
 ovs-vsctl del-port ovs2 h1-port > /dev/null 2>&1 || true
 ovs-vsctl del-port ovs2 ovs2-ovs1-veth > /dev/null 2>&1 || true
 ovs-vsctl del-port ovs2 TO_TA_VXLAN > /dev/null 2>&1 || true
+ovs-vsctl del-port ovs2 TO_34_VXLAN > /dev/null 2>&1 || true
+ovs-vsctl del-port ovs2 TO_36_VXLAN > /dev/null 2>&1 || true
 
 # Delete OVS bridges
 ovs-vsctl del-br ovs1 > /dev/null 2>&1 || true
