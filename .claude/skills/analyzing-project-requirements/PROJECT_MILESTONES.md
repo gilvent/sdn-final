@@ -54,7 +54,8 @@ Requirements:
 - ARP handling by `vrouter` proxy ARP approach
 - NDP handling by `vrouter` proxy NDP approach. Consider that Neighbor Advertisement may use multicast address.
 - Forwarding between `ovs3` and `frr0` using MultiPointToSinglePoint intent may be necessary.
-- Obtaining `ovs3` interface from network config based on IP may be necessary. 
+- Obtaining `ovs3` interface from network config based on IP may be necessary.
+- Only advertise `AS65xx0` and `AS65xx1` network prefixes to `AS65000` BGP
 
 
 Examples:
@@ -113,7 +114,19 @@ Examples:
     },
 ```
 
-## 4. Peer Networks Communication
+## 4. BGP Peering with Peer Networks
+`frr0` between peer networks (id = `34`, id = `35`, id = `36`) can establish BGP session and ping each other using IPv4 and IPv6
+
+Requirements:
+- Outgoing traffic goes through dedicated VXLAN on `ovs2`
+- Incoming traffic comes from dedicated VXLAN on `ovs2`
+- Only advertise AS65xx0 network to peer BGP. Do not advertise AS65xx1's.
+
+Examples:
+- Check received routes: `docker exec frr0 vtysh -c "show ip bgp nei 192.168.70.34 routes"`
+- Check advertised routes: `docker exec frr0 vtysh -c "show bgp ipv6 nei fd70::36 adv"`
+
+## 5. Peer Networks Communication
 Hosts between peer networks (id = `34`, id = `35`, id = `36`)can ping each other using IPv4 and IPv6
 
 ### Destination is Peer Network's AS65xx0

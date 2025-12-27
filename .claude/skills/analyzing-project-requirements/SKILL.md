@@ -1,6 +1,6 @@
 ---
 name: analyzing-project-requirements
-description: This skill analyzes independent tasks with the knowledge of overall project requirements. Use when verifying issues in the project and making implementations in the project.
+description: This skill analyzes independent tasks with the knowledge of overall project requirements. Always use when analyzing and debugging issues, making implementation plans, optimizing implementation.
 ---
 
 # Project Understanding Skill
@@ -13,19 +13,19 @@ Understand:
 - **Network Topology**: Entire network topology used in the project
 - **Project Milestones**: Planned project milestones, including ones that may have already been implemented
 
-## When to Use
+## Use Cases
 
-- **Analyzing Issues**: Use when verifying issues found in current implementation
+- **Analyzing and Debugging Issues**: Use when verifying issues found in current implementation
 - **Reviewing Implementation Plan**: Use to analyze if an implementation plan can solve the problem within requirements
 - **Optimizing Solution**: Use to create an extensible and accurate solution
 
 ## Example Usage
 
-"Implement the following feature with these requirements: ..."
+"Understand the topology"
 
-"Analyze if this approach could work: ..."
+"Create an implementation plan to allow communication to peer network's AS65xx0"
 
-"Check why this issue happens: ..."
+"Analyze why BGP session is not established although frr0 can ping to AS65000 BGP speaker"
 
 ## References
 
