@@ -178,6 +178,8 @@ public class AppComponent {
     private ConnectPoint frr36ConnectPoint;  // VXLAN port for AS65360 (192.168.70.36)
     // Stores pairs of [localIp, peerIp] for peer network BGP peering
     private List<Ip4Address[]> peerNetworkV4Peers = new ArrayList<>();
+    // Stores pairs of [localIp, peerIp] for peer network IPv6 BGP peering
+    private List<Ip6Address[]> peerNetworkV6Peers = new ArrayList<>();
 
     private ConsistentMap<Ip4Address, MacAddress> ipToMacTable;
     private ConsistentMap<Ip6Address, MacAddress> ip6ToMacTable;
@@ -328,7 +330,9 @@ public class AppComponent {
             }
 
             // Parse v6-peer to get WAN IPv6 local and peer addresses
-            // First entry is WAN peering (AS65000), subsequent entries are internal peers
+            // Entry 0: WAN peering (AS65000)
+            // Entry 1: Internal peer (frr0 <-> frr1)
+            // Entry 2+: Peer networks (AS65340, AS65360)
             List<String[]> v6Peers = config.v6Peers();
             if (v6Peers != null && !v6Peers.isEmpty()) {
                 // First entry: WAN peering (fd70::35 <-> fd70::fe)
@@ -337,16 +341,26 @@ public class AppComponent {
                 wanPeerIp6 = Ip6Address.valueOf(peer[1]);
                 log.info("Loaded WAN IPv6 peering config: local={}, peer={}", wanLocalIp6, wanPeerIp6);
 
-                // Clear previous internal peers
+                // Clear previous internal peers and peer network peers
                 internalV6Peers.clear();
+                peerNetworkV6Peers.clear();
 
-                // Subsequent entries: internal peers (e.g., fd63::1 <-> fd63::2)
-                for (int i = 1; i < v6Peers.size(); i++) {
-                    String[] internalPeer = v6Peers.get(i);
+                // Second entry: internal peer (fd63::1 <-> fd63::2)
+                if (v6Peers.size() > 1) {
+                    String[] internalPeer = v6Peers.get(1);
                     Ip6Address localIp = Ip6Address.valueOf(internalPeer[0]);
                     Ip6Address peerIp = Ip6Address.valueOf(internalPeer[1]);
                     internalV6Peers.add(new Ip6Address[]{localIp, peerIp});
                     log.info("Loaded internal IPv6 peering config: local={}, peer={}", localIp, peerIp);
+                }
+
+                // Entries 2+: peer networks (AS65340, AS65360)
+                for (int i = 2; i < v6Peers.size(); i++) {
+                    String[] peerNetEntry = v6Peers.get(i);
+                    Ip6Address localIp = Ip6Address.valueOf(peerNetEntry[0]);
+                    Ip6Address peerIp = Ip6Address.valueOf(peerNetEntry[1]);
+                    peerNetworkV6Peers.add(new Ip6Address[]{localIp, peerIp});
+                    log.info("Loaded peer network IPv6 config: local={}, peer={}", localIp, peerIp);
                 }
             }
 
@@ -373,6 +387,9 @@ public class AppComponent {
 
             // Install peer network forwarding intents (AS65340 and AS65360)
             installPeerNetworkForwardingIntents();
+
+            // Install peer network IPv6 forwarding intents (AS65340 and AS65360)
+            installPeerNetworkV6ForwardingIntents();
         }
     }
 
@@ -496,6 +513,36 @@ public class AppComponent {
                     // Traffic to frr0's WAN IPv6 - forward to frr0
                     if (frr0ConnectPoint != null) {
                         log.info("Forwarding WAN IPv6 to frr0: {} -> {}", dstIp, frr0ConnectPoint);
+                        packetOut(frr0ConnectPoint, eth);
+                    }
+                    return;
+                }
+
+                // Handle traffic FROM peer network VXLAN ports (inbound)
+                if ((frr34ConnectPoint != null && srcPoint.equals(frr34ConnectPoint)) ||
+                    (frr36ConnectPoint != null && srcPoint.equals(frr36ConnectPoint))) {
+                    Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
+
+                    
+                    // Handle NDP from peer network VXLAN ports directly
+                    if (ipv6.getNextHeader() == IPv6.PROTOCOL_ICMP6) {
+                        ICMP6 icmp6 = (ICMP6) ipv6.getPayload();
+                        byte type = icmp6.getIcmpType();
+                        if (type == ICMP6.NEIGHBOR_SOLICITATION || type == ICMP6.NEIGHBOR_ADVERTISEMENT) {
+                            handlePeerNetworkNDP(context, eth);
+                            return;
+                        }
+                    }
+
+                    // Block non-NDP IPv6 not destined for frr0's WAN IPv6
+                    if (wanLocalIp6 == null || !dstIp.equals(wanLocalIp6)) {
+                        log.debug("Blocking peer network IPv6 not for frr0: dstIp={}", dstIp);
+                        return;
+                    }
+
+                    // Traffic to frr0's WAN IPv6 - forward to frr0
+                    if (frr0ConnectPoint != null) {
+                        log.info("Forwarding peer network IPv6 to frr0: {} -> {}", dstIp, frr0ConnectPoint);
                         packetOut(frr0ConnectPoint, eth);
                     }
                     return;
@@ -801,6 +848,13 @@ public class AppComponent {
         // Handle NDP packets from WAN port separately
         if (externalPort != null && srcPoint.equals(externalPort)) {
             handleWanNDP(context, eth);
+            return;
+        }
+
+        // Handle NDP packets from peer network VXLAN ports (AS65340 and AS65360)
+        if ((frr34ConnectPoint != null && srcPoint.equals(frr34ConnectPoint)) ||
+            (frr36ConnectPoint != null && srcPoint.equals(frr36ConnectPoint))) {
+            handlePeerNetworkNDP(context, eth);
             return;
         }
 
@@ -1435,6 +1489,159 @@ public class AppComponent {
                     peerIp, peerConnectPoint, frr0ConnectPoint);
 
             log.info("Peer network IPv4 BGP forwarding enabled: {} <-> {}", localIp, peerIp);
+        }
+    }
+
+    /**
+     * Handle NDP packets received from peer network VXLAN ports (AS65340 and AS65360).
+     * - Block NDP not destined to frr0's WAN IPv6 (fd70::35)
+     * - Forward NDP Neighbor Advertisements to frr0
+     * - Send proxy NDP replies for Neighbor Solicitations targeting frr0's WAN IPv6
+     */
+    private void handlePeerNetworkNDP(PacketContext context, Ethernet eth) {
+        ConnectPoint srcPoint = context.inPacket().receivedFrom();
+        IPv6 ipv6 = (IPv6) eth.getPayload();
+
+        // Verify this is an ICMP6 packet
+        if (ipv6.getNextHeader() != IPv6.PROTOCOL_ICMP6) {
+            log.debug("Dropping non-ICMP6 IPv6 from peer network port");
+            return;
+        }
+
+        ICMP6 icmp6 = (ICMP6) ipv6.getPayload();
+        byte type = icmp6.getIcmpType();
+
+        // Only handle NDP packets (NS and NA)
+        if (type != ICMP6.NEIGHBOR_SOLICITATION && type != ICMP6.NEIGHBOR_ADVERTISEMENT) {
+            log.debug("Dropping non-NDP ICMP6 from peer network port: type={}", type);
+            return;
+        }
+
+        MacAddress srcMac = eth.getSourceMAC();
+        MacAddress dstMac = eth.getDestinationMAC();
+        Ip6Address srcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
+
+        // Handle Neighbor Advertisement (response to our NS)
+        if (type == ICMP6.NEIGHBOR_ADVERTISEMENT) {
+            // Block NA if destination MAC is not frr0's MAC
+            if (frr0Mac == null || !dstMac.equals(frr0Mac)) {
+                log.debug("Blocking peer network Neighbor Advertisement not for frr0 MAC: dstMac={}", dstMac);
+                return;
+            }
+
+            // Learn peer network's IPv6 and MAC
+            ip6ToMacTable.put(srcIp, srcMac);
+            log.info("Learned peer network IPv6 MAC: {} -> {}", srcIp, srcMac);
+
+            // Forward NA to frr0 connect point
+            if (frr0ConnectPoint != null) {
+                log.info("Forwarding peer network Neighbor Advertisement to frr0 at {}", frr0ConnectPoint);
+                packetOut(frr0ConnectPoint, eth);
+            }
+            return;
+        }
+
+        // Handle Neighbor Solicitation (request from peer network)
+        if (type == ICMP6.NEIGHBOR_SOLICITATION) {
+            NeighborSolicitation ns = (NeighborSolicitation) icmp6.getPayload();
+            byte[] targetBytes = ns.getTargetAddress();
+            Ip6Address targetIp = Ip6Address.valueOf(targetBytes);
+
+            // Block NS not destined to frr0's WAN IPv6
+            if (wanLocalIp6 == null || !targetIp.equals(wanLocalIp6)) {
+                log.debug("Blocking peer network Neighbor Solicitation not for frr0: targetIp={}", targetIp);
+                return;
+            }
+
+            // Peer network is asking for frr0's WAN IPv6 MAC - send proxy NDP reply
+            log.info("Peer network Neighbor Solicitation for {} from {}. Replying with frr0 MAC {}",
+                    targetIp, srcPoint, frr0Mac);
+
+            // Learn the peer network's IPv6 and MAC from the NS
+            ip6ToMacTable.put(srcIp, srcMac);
+            log.info("Learned peer network IPv6 MAC from NS: {} -> {}", srcIp, srcMac);
+
+            Ethernet ndpReply = NeighborAdvertisement2.buildNdpAdv(targetIp, frr0Mac, eth);
+            packetOut(srcPoint, ndpReply);
+            return;
+        }
+    }
+
+    /**
+     * Install bidirectional PointToPointIntents for peer network IPv6 traffic.
+     * This enables BGP communication between frr0 and peer networks (AS65340 and AS65360) over IPv6.
+     */
+    private void installPeerNetworkV6ForwardingIntents() {
+        if (peerNetworkV6Peers.isEmpty()) {
+            log.info("No peer network IPv6 peers configured");
+            return;
+        }
+
+        if (frr0ConnectPoint == null) {
+            log.warn("Cannot install peer network IPv6 intents: frr0ConnectPoint is null");
+            return;
+        }
+
+        // Map peer IPs to their connect points
+        Map<Ip6Address, ConnectPoint> peerToConnectPoint = new HashMap<>();
+        if (frr34ConnectPoint != null && peerNetworkV6Peers.size() > 0) {
+            // First peer network entry is AS65340 (fd70::34)
+            peerToConnectPoint.put(peerNetworkV6Peers.get(0)[1], frr34ConnectPoint);
+        }
+        if (frr36ConnectPoint != null && peerNetworkV6Peers.size() > 1) {
+            // Second peer network entry is AS65360 (fd70::36)
+            peerToConnectPoint.put(peerNetworkV6Peers.get(1)[1], frr36ConnectPoint);
+        }
+
+        for (Ip6Address[] peerPair : peerNetworkV6Peers) {
+            Ip6Address localIp = peerPair[0];   // frr0's WAN IPv6 (fd70::35)
+            Ip6Address peerIp = peerPair[1];    // Peer network IPv6 (fd70::34 or fd70::36)
+
+            ConnectPoint peerConnectPoint = peerToConnectPoint.get(peerIp);
+            if (peerConnectPoint == null) {
+                log.warn("No connect point configured for peer IPv6 {}", peerIp);
+                continue;
+            }
+
+            // Intent 1: frr0 -> peer network (traffic to peer IP)
+            TrafficSelector toPeerSelector = DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV6)
+                    .matchIPv6Dst(IpPrefix.valueOf(peerIp, 128))
+                    .build();
+
+            PointToPointIntent toPeerIntent = PointToPointIntent.builder()
+                    .appId(appId)
+                    .selector(toPeerSelector)
+                    .treatment(DefaultTrafficTreatment.builder().build())
+                    .filteredIngressPoint(new FilteredConnectPoint(frr0ConnectPoint))
+                    .filteredEgressPoint(new FilteredConnectPoint(peerConnectPoint))
+                    .priority(50000)
+                    .build();
+
+            intentService.submit(toPeerIntent);
+            log.info("Installed peer network IPv6 intent: frr0 ({}) -> peer {} ({})",
+                    frr0ConnectPoint, peerIp, peerConnectPoint);
+
+            // Intent 2: peer network -> frr0 (traffic from peer to frr0's WAN IPv6)
+            TrafficSelector fromPeerSelector = DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV6)
+                    .matchIPv6Dst(IpPrefix.valueOf(localIp, 128))
+                    .build();
+
+            PointToPointIntent fromPeerIntent = PointToPointIntent.builder()
+                    .appId(appId)
+                    .selector(fromPeerSelector)
+                    .treatment(DefaultTrafficTreatment.builder().build())
+                    .filteredIngressPoint(new FilteredConnectPoint(peerConnectPoint))
+                    .filteredEgressPoint(new FilteredConnectPoint(frr0ConnectPoint))
+                    .priority(50000)
+                    .build();
+
+            intentService.submit(fromPeerIntent);
+            log.info("Installed peer network IPv6 intent: peer {} ({}) -> frr0 ({})",
+                    peerIp, peerConnectPoint, frr0ConnectPoint);
+
+            log.info("Peer network IPv6 BGP forwarding enabled: {} <-> {}", localIp, peerIp);
         }
     }
 
