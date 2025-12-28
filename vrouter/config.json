@@ -23,7 +23,11 @@
         ],
         "frr1-connect-point": "of:0000000000000001/5",
         "frr34-connect-point": "of:0000000000000002/4",
-        "frr36-connect-point": "of:0000000000000002/5"
+        "frr36-connect-point": "of:0000000000000002/5",
+        "peer-sdn-prefixes": [
+          "34, 172.16.34.0/24",
+          "36, 172.16.36.0/24"
+        ]
       }
     }
   },

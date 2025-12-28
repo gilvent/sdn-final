@@ -57,6 +57,7 @@ import org.onosproject.net.edge.EdgePortService;
 import org.onosproject.net.intf.InterfaceService;
 import org.onosproject.net.intent.Intent;
 import org.onosproject.net.intent.IntentService;
+import org.onosproject.net.intent.MultiPointToSinglePointIntent;
 import org.onosproject.net.intent.PointToPointIntent;
 import org.onosproject.net.FilteredConnectPoint;
 import org.onosproject.net.config.ConfigFactory;
@@ -83,9 +84,11 @@ import org.slf4j.LoggerFactory;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Virtual Router ONOS application combining ProxyARP/NDP and Learning Bridge.
@@ -180,6 +183,12 @@ public class AppComponent {
     private List<Ip4Address[]> peerNetworkV4Peers = new ArrayList<>();
     // Stores pairs of [localIp, peerIp] for peer network IPv6 BGP peering
     private List<Ip6Address[]> peerNetworkV6Peers = new ArrayList<>();
+
+    // Peer network SDN prefix mappings for data plane traffic
+    // Maps AS ID (e.g., 34, 36) to SDN prefix (e.g., 172.16.34.0/24, 172.16.36.0/24)
+    private Map<Integer, IpPrefix> peerSdnPrefixes = new HashMap<>();
+    // Local SDN prefix for incoming traffic matching
+    private IpPrefix localSdnPrefix;
 
     private ConsistentMap<Ip4Address, MacAddress> ipToMacTable;
     private ConsistentMap<Ip6Address, MacAddress> ip6ToMacTable;
@@ -390,6 +399,24 @@ public class AppComponent {
 
             // Install peer network IPv6 forwarding intents (AS65340 and AS65360)
             installPeerNetworkV6ForwardingIntents();
+
+            // Load peer SDN prefixes for data plane traffic
+            peerSdnPrefixes = config.peerSdnPrefixes();
+            if (!peerSdnPrefixes.isEmpty()) {
+                log.info("Loaded {} peer SDN prefixes for data plane traffic", peerSdnPrefixes.size());
+                for (Map.Entry<Integer, IpPrefix> entry : peerSdnPrefixes.entrySet()) {
+                    log.info("  AS65{}: {}", entry.getKey(), entry.getValue());
+                }
+            }
+
+            // Derive local SDN prefix from virtual gateway IP (172.16.35.1 -> 172.16.35.0/24)
+            if (virtualGatewayIp4 != null) {
+                localSdnPrefix = IpPrefix.valueOf(virtualGatewayIp4, 24);
+                log.info("Derived local SDN prefix: {}", localSdnPrefix);
+            }
+
+            // Install peer network data plane intents (host-to-host communication)
+            installPeerNetworkDataPlaneIntents();
         }
     }
 
@@ -458,21 +485,31 @@ public class AppComponent {
                     return;
                 }
 
-                // Block IPv4 from peer network VXLAN ports that isn't destined for frr0's WAN IP
+                // Handle IPv4 from peer network VXLAN ports
                 if ((frr34ConnectPoint != null && srcPoint.equals(frr34ConnectPoint)) ||
                     (frr36ConnectPoint != null && srcPoint.equals(frr36ConnectPoint))) {
                     IPv4 ipv4 = (IPv4) eth.getPayload();
                     Ip4Address dstIp = Ip4Address.valueOf(ipv4.getDestinationAddress());
-                    if (wanLocalIp4 == null || !dstIp.equals(wanLocalIp4)) {
-                        // Drop peer network IPv4 traffic not destined for frr0
-                        log.debug("Blocking peer network IPv4 not for frr0: dstIp={}", dstIp);
+
+                    // Allow traffic destined for frr0's WAN IP (BGP control plane)
+                    if (wanLocalIp4 != null && dstIp.equals(wanLocalIp4)) {
+                        if (frr0ConnectPoint != null) {
+                            log.info("Forwarding peer network IPv4 to frr0: {} -> {}", dstIp, frr0ConnectPoint);
+                            packetOut(frr0ConnectPoint, eth);
+                        }
                         return;
                     }
-                    // Traffic to frr0's WAN IP - forward to frr0
-                    if (frr0ConnectPoint != null) {
-                        log.info("Forwarding peer network IPv4 to frr0: {} -> {}", dstIp, frr0ConnectPoint);
-                        packetOut(frr0ConnectPoint, eth);
+
+                    // Handle data plane traffic destined for local SDN network
+                    // Do L3 routing to forward to the correct local host
+                    if (localSdnPrefix != null && localSdnPrefix.contains(dstIp)) {
+                        log.info("Peer network data plane: routing {} to local host", dstIp);
+                        handleIncomingPeerTraffic(context, eth, dstIp);
+                        return;
                     }
+
+                    // Block other peer network IPv4 traffic
+                    log.debug("Blocking peer network IPv4 not for frr0 or local SDN: dstIp={}", dstIp);
                     return;
                 }
 
@@ -1643,6 +1680,200 @@ public class AppComponent {
 
             log.info("Peer network IPv6 BGP forwarding enabled: {} <-> {}", localIp, peerIp);
         }
+    }
+
+    /**
+     * Handle incoming IPv4 traffic from peer network VXLAN ports destined for local SDN hosts.
+     * Performs L3 routing: looks up destination MAC and forwards to the correct local host.
+     */
+    private void handleIncomingPeerTraffic(PacketContext context, Ethernet eth, Ip4Address dstIp) {
+        // Look up the destination MAC for the local host
+        MacAddress dstMac = ipToMacTable.asJavaMap().get(dstIp);
+
+        if (dstMac == null) {
+            // Try to find via HostService
+            for (Host host : hostService.getHosts()) {
+                for (IpAddress ip : host.ipAddresses()) {
+                    if (ip.equals(dstIp)) {
+                        dstMac = host.mac();
+                        // Cache the mapping
+                        ipToMacTable.put(dstIp, dstMac);
+                        break;
+                    }
+                }
+                if (dstMac != null) {
+                    break;
+                }
+            }
+        }
+
+        if (dstMac == null) {
+            log.warn("Incoming peer traffic: cannot find MAC for local host {}", dstIp);
+            // Send ARP request to resolve the destination
+            // For now, just drop the packet
+            return;
+        }
+
+        // Find the output port for this MAC
+        ConnectPoint outPoint = findHostEdgePoint(dstMac);
+
+        if (outPoint == null) {
+            // Try bridge table
+            for (Map.Entry<DeviceId, Map<MacAddress, PortNumber>> entry : bridgeTable.entrySet()) {
+                DeviceId deviceId = entry.getKey();
+                Map<MacAddress, PortNumber> macTable = entry.getValue();
+                PortNumber outPort = macTable.get(dstMac);
+                if (outPort != null) {
+                    outPoint = new ConnectPoint(deviceId, outPort);
+                    break;
+                }
+            }
+        }
+
+        if (outPoint == null) {
+            log.warn("Incoming peer traffic: cannot find port for MAC {}", dstMac);
+            return;
+        }
+
+        // Create routed packet with rewritten MACs
+        Ethernet routedPkt = eth.duplicate();
+        routedPkt.setSourceMACAddress(virtualGatewayMac);
+        routedPkt.setDestinationMACAddress(dstMac);
+
+        log.info("Incoming peer traffic: routing to {} ({}) via {}", dstIp, dstMac, outPoint);
+
+        // Send the packet
+        packetOut(outPoint, routedPkt);
+
+        // Install flow rule only if on the same device (cross-switch handled by packetOut)
+        ConnectPoint inPoint = context.inPacket().receivedFrom();
+        if (inPoint.deviceId().equals(outPoint.deviceId())) {
+            installIncomingPeerFlowRule(inPoint, dstIp, dstMac, outPoint);
+        }
+    }
+
+    /**
+     * Install a flow rule for incoming peer network traffic to a specific local host.
+     */
+    private void installIncomingPeerFlowRule(ConnectPoint inPoint, Ip4Address dstIp,
+                                              MacAddress dstMac, ConnectPoint outPoint) {
+        // Install on the device where packet was received
+        DeviceId deviceId = inPoint.deviceId();
+
+        TrafficSelector selector = DefaultTrafficSelector.builder()
+                .matchEthType(Ethernet.TYPE_IPV4)
+                .matchIPDst(IpPrefix.valueOf(dstIp, 32))
+                .matchInPort(inPoint.port())
+                .build();
+
+        TrafficTreatment treatment = DefaultTrafficTreatment.builder()
+                .setEthSrc(virtualGatewayMac)
+                .setEthDst(dstMac)
+                .setOutput(outPoint.port())
+                .build();
+
+        FlowRule flowRule = DefaultFlowRule.builder()
+                .forDevice(deviceId)
+                .withSelector(selector)
+                .withTreatment(treatment)
+                .withPriority(45000)
+                .fromApp(appId)
+                .makeTemporary(60)
+                .build();
+
+        flowRuleService.applyFlowRules(flowRule);
+        log.info("Installed incoming peer flow rule: {} port {} -> {} via port {}",
+                deviceId, inPoint.port(), dstIp, outPoint.port());
+    }
+
+    /**
+     * Install MultiPointToSinglePoint intents for outgoing peer network data plane traffic.
+     * This enables host-to-host communication between local SDN hosts and peer network SDN hosts.
+     *
+     * Outgoing traffic (172.16.35.0/24 -> 172.16.34.0/24 or 172.16.36.0/24):
+     *   MultiPointToSinglePoint intent: h1/h2 ports -> VXLAN port
+     *
+     * Incoming traffic is handled by packet processor (handleIncomingPeerTraffic)
+     * which provides per-host L3 routing with MAC rewriting.
+     */
+    private void installPeerNetworkDataPlaneIntents() {
+        if (peerSdnPrefixes.isEmpty()) {
+            log.info("No peer SDN prefixes configured for data plane intents");
+            return;
+        }
+
+        if (localSdnPrefix == null) {
+            log.warn("Cannot install peer network data plane intents: localSdnPrefix is null");
+            return;
+        }
+
+        // Get edge ports for local hosts (excluding frr0, frr1, VXLAN ports, and WAN port)
+        Set<FilteredConnectPoint> localHostPorts = new HashSet<>();
+        for (ConnectPoint cp : edgePortService.getEdgePoints()) {
+            // Exclude infrastructure ports
+            if (cp.equals(frr0ConnectPoint) || cp.equals(frr1ConnectPoint) ||
+                cp.equals(frr34ConnectPoint) || cp.equals(frr36ConnectPoint) ||
+                cp.equals(externalPort)) {
+                continue;
+            }
+            localHostPorts.add(new FilteredConnectPoint(cp));
+        }
+
+        if (localHostPorts.isEmpty()) {
+            log.warn("No local host ports found for peer network data plane intents");
+            return;
+        }
+
+        log.info("Found {} local host edge ports for data plane intents", localHostPorts.size());
+
+        // Map AS ID to VXLAN connect point
+        Map<Integer, ConnectPoint> asIdToConnectPoint = new HashMap<>();
+        if (frr34ConnectPoint != null) {
+            asIdToConnectPoint.put(34, frr34ConnectPoint);
+        }
+        if (frr36ConnectPoint != null) {
+            asIdToConnectPoint.put(36, frr36ConnectPoint);
+        }
+
+        // Install intents for each peer network
+        for (Map.Entry<Integer, IpPrefix> entry : peerSdnPrefixes.entrySet()) {
+            int asId = entry.getKey();
+            IpPrefix peerPrefix = entry.getValue();
+            ConnectPoint vxlanPort = asIdToConnectPoint.get(asId);
+
+            if (vxlanPort == null) {
+                log.warn("No VXLAN connect point configured for AS65{}", asId);
+                continue;
+            }
+
+            log.info("Installing data plane intents for peer AS65{}: prefix={}, vxlan={}",
+                    asId, peerPrefix, vxlanPort);
+
+            // Intent 1: Outgoing traffic - local hosts -> peer network via VXLAN
+            // MultiPointToSinglePoint: match dst IP in peer prefix, forward to VXLAN port
+            TrafficSelector outgoingSelector = DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV4)
+                    .matchIPDst(peerPrefix)
+                    .build();
+
+            MultiPointToSinglePointIntent outgoingIntent = MultiPointToSinglePointIntent.builder()
+                    .appId(appId)
+                    .selector(outgoingSelector)
+                    .treatment(DefaultTrafficTreatment.builder().build())
+                    .filteredIngressPoints(localHostPorts)
+                    .filteredEgressPoint(new FilteredConnectPoint(vxlanPort))
+                    .priority(45000)
+                    .build();
+
+            intentService.submit(outgoingIntent);
+            log.info("Installed outgoing data plane intent: local hosts -> {} via {}",
+                    peerPrefix, vxlanPort);
+
+            // Incoming traffic is handled by packet processor (handleIncomingPeerTraffic)
+            // which provides per-host L3 routing with proper MAC rewriting
+        }
+
+        log.info("Peer network data plane intents installed successfully");
     }
 
 }

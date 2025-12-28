@@ -17,13 +17,16 @@ package nycu.winlab.vrouter;
 
 import org.onlab.packet.Ip4Address;
 import org.onlab.packet.Ip6Address;
+import org.onlab.packet.IpPrefix;
 import org.onlab.packet.MacAddress;
 import org.onosproject.core.ApplicationId;
 import org.onosproject.net.ConnectPoint;
 import org.onosproject.net.config.Config;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Configuration for the VRouter application.
@@ -43,6 +46,7 @@ public class VRouterConfig extends Config<ApplicationId> {
     private static final String WAN_CONNECT_POINT = "wan-connect-point";
     private static final String V4_PEER = "v4-peer";
     private static final String V6_PEER = "v6-peer";
+    private static final String PEER_SDN_PREFIXES = "peer-sdn-prefixes";
 
     @Override
     public boolean isValid() {
@@ -50,7 +54,8 @@ public class VRouterConfig extends Config<ApplicationId> {
                 FRR34_CONNECT_POINT, FRR36_CONNECT_POINT,
                 FRR_ZERO_MAC, FRR_ZERO_IP4, FRR_ZERO_IP6,
                 VIRTUAL_GATEWAY_IP4, VIRTUAL_GATEWAY_IP6,
-                VIRTUAL_GATEWAY_MAC, WAN_CONNECT_POINT, V4_PEER, V6_PEER);
+                VIRTUAL_GATEWAY_MAC, WAN_CONNECT_POINT, V4_PEER, V6_PEER,
+                PEER_SDN_PREFIXES);
     }
 
     /**
@@ -213,5 +218,33 @@ public class VRouterConfig extends Config<ApplicationId> {
             node.get(key).forEach(item -> result.add(item.asText()));
         }
         return result;
+    }
+
+    /**
+     * Gets the peer SDN prefix mappings.
+     * Config format: ["34, 172.16.34.0/24", "36, 172.16.36.0/24"]
+     * Maps AS ID (last two digits of AS number) to SDN network prefix.
+     *
+     * @return Map of AS ID to IpPrefix, or empty map if not configured
+     */
+    public Map<Integer, IpPrefix> peerSdnPrefixes() {
+        Map<Integer, IpPrefix> prefixes = new HashMap<>();
+        if (!hasField(PEER_SDN_PREFIXES)) {
+            return prefixes;
+        }
+
+        for (String entry : getStringList(PEER_SDN_PREFIXES)) {
+            String[] parts = entry.split(",");
+            if (parts.length == 2) {
+                try {
+                    int asId = Integer.parseInt(parts[0].trim());
+                    IpPrefix prefix = IpPrefix.valueOf(parts[1].trim());
+                    prefixes.put(asId, prefix);
+                } catch (IllegalArgumentException e) {
+                    // Skip invalid entries
+                }
+            }
+        }
+        return prefixes;
     }
 }
