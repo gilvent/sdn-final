@@ -159,9 +159,9 @@ public class AppComponent {
     // External port (interface port) where ARP/NDP should be dropped
     private ConnectPoint externalPort;
 
-    // WAN peering configuration (for AS65000 BGP)
+    // WAN peering configuration (for AS65000, AS65340, AS65360 BGP)
     private Ip4Address wanLocalIp4;       // frr0's IP on WAN subnet (192.168.70.35)
-    private Ip4Address wanPeerIp4;        // AS65000 BGP speaker IP (192.168.70.253)
+    private List<Ip4Address> wanPeerIp4List = new ArrayList<>();  // BGP peer IPs (AS65000, AS65340, AS65360)
     private ConnectPoint frr0ConnectPoint; // Connect point where frr0 is connected
     private ConnectPoint frr1ConnectPoint; // Connect point where frr1 is connected
 
@@ -278,13 +278,20 @@ public class AppComponent {
             log.info("Loaded frr0 connect point: {}", frr0ConnectPoint);
             log.info("Loaded frr1 connect point: {}", frr1ConnectPoint);
 
-            // Parse v4-peer to get WAN local and peer IPs
+            // Parse v4-peer to get WAN local and all peer IPs
             List<String[]> v4Peers = config.v4Peers();
             if (v4Peers != null && !v4Peers.isEmpty()) {
-                String[] peer = v4Peers.get(0);
-                wanLocalIp4 = Ip4Address.valueOf(peer[0]);
-                wanPeerIp4 = Ip4Address.valueOf(peer[1]);
-                log.info("Loaded WAN peering config: local={}, peer={}", wanLocalIp4, wanPeerIp4);
+                // First entry sets local IP
+                String[] firstPeer = v4Peers.get(0);
+                wanLocalIp4 = Ip4Address.valueOf(firstPeer[0]);
+
+                // Clear previous peers and add all peer IPs
+                wanPeerIp4List.clear();
+                for (String[] peer : v4Peers) {
+                    Ip4Address peerIp = Ip4Address.valueOf(peer[1]);
+                    wanPeerIp4List.add(peerIp);
+                    log.info("Loaded WAN v4 peer: local={}, peer={}", peer[0], peerIp);
+                }
             }
 
             // Pre-populate frr0 IP-MAC mappings for L3 routing
@@ -412,6 +419,21 @@ public class AppComponent {
                         packetOut(frr0ConnectPoint, eth);
                     }
                     return;
+                }
+
+                // Handle IPv4 traffic FROM frr0 TO WAN peers (outbound BGP traffic)
+                if (frr0ConnectPoint != null && srcPoint.equals(frr0ConnectPoint) && !wanPeerIp4List.isEmpty()) {
+                    IPv4 ipv4 = (IPv4) eth.getPayload();
+                    Ip4Address dstIp = Ip4Address.valueOf(ipv4.getDestinationAddress());
+
+                    // Forward traffic destined to any WAN peer to external port
+                    for (Ip4Address peerIp : wanPeerIp4List) {
+                        if (dstIp.equals(peerIp)) {
+                            log.info("Forwarding frr0 IPv4 to WAN peer {}: {} -> {}", peerIp, frr0ConnectPoint, externalPort);
+                            packetOut(externalPort, eth);
+                            return;
+                        }
+                    }
                 }
 
                 // Check if this is L3 routing (destination is our virtual gateway MAC)
@@ -588,11 +610,15 @@ public class AppComponent {
                 return;
             }
 
-            // Check if ARP target is WAN peer IP - forward to WAN port
-            if (wanPeerIp4 != null && dstIp.equals(wanPeerIp4)) {
-                log.info("Forwarding ARP Request for WAN peer {} to WAN port", dstIp);
-                packetOut(externalPort, eth);
-                return;
+            // Check if ARP target is any WAN peer IP - forward to WAN port
+            if (externalPort != null && !wanPeerIp4List.isEmpty()) {
+                for (Ip4Address peerIp : wanPeerIp4List) {
+                    if (dstIp.equals(peerIp)) {
+                        log.info("Forwarding ARP Request for WAN peer {} to WAN port", dstIp);
+                        packetOut(externalPort, eth);
+                        return;
+                    }
+                }
             }
 
             // Handle ProxyARP
@@ -663,7 +689,7 @@ public class AppComponent {
 
         if (arp.getOpCode() == ARP.OP_REQUEST) {
             // AS65000 is asking for frr0's WAN IP MAC - send proxy ARP reply
-            log.info("WAN ARP Request for {}. Replying with frr0 MAC {}", dstIp, frr0Mac);
+            log.info("WAN ARP Request for {} from {}. Replying with frr0 MAC {}", dstIp, srcIp, frr0Mac);
             Ethernet arpReply = buildArpReply(dstIp, frr0Mac, srcIp, srcMac);
             packetOut(externalPort, arpReply);
             return;
@@ -1137,34 +1163,36 @@ public class AppComponent {
     }
 
     /**
-     * Install PointToPointIntent for IPv4 forwarding between frr0 and AS65000.
-     * Creates bidirectional intents for BGP traffic.
+     * Install PointToPointIntent for IPv4 forwarding between frr0 and WAN peers.
+     * Creates bidirectional intents for BGP traffic with AS65000, AS65340, AS65360.
      */
     private void installWanForwardingIntents() {
-        if (wanPeerIp4 == null || wanLocalIp4 == null || externalPort == null || frr0ConnectPoint == null) {
+        if (wanPeerIp4List.isEmpty() || wanLocalIp4 == null || externalPort == null || frr0ConnectPoint == null) {
             log.info("WAN forwarding intents not installed: missing configuration");
             return;
         }
 
-        // Intent 1: frr0 -> AS65000 (traffic to WAN peer)
-        TrafficSelector toWanSelector = DefaultTrafficSelector.builder()
-                .matchEthType(Ethernet.TYPE_IPV4)
-                .matchIPDst(IpPrefix.valueOf(wanPeerIp4, 32))
-                .build();
+        // Install outbound intents for each WAN peer (frr0 -> peer)
+        for (Ip4Address peerIp : wanPeerIp4List) {
+            TrafficSelector toWanSelector = DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV4)
+                    .matchIPDst(IpPrefix.valueOf(peerIp, 32))
+                    .build();
 
-        PointToPointIntent toWanIntent = PointToPointIntent.builder()
-                .appId(appId)
-                .selector(toWanSelector)
-                .treatment(DefaultTrafficTreatment.builder().build())
-                .filteredIngressPoint(new FilteredConnectPoint(frr0ConnectPoint))
-                .filteredEgressPoint(new FilteredConnectPoint(externalPort))
-                .priority(50000)
-                .build();
+            PointToPointIntent toWanIntent = PointToPointIntent.builder()
+                    .appId(appId)
+                    .selector(toWanSelector)
+                    .treatment(DefaultTrafficTreatment.builder().build())
+                    .filteredIngressPoint(new FilteredConnectPoint(frr0ConnectPoint))
+                    .filteredEgressPoint(new FilteredConnectPoint(externalPort))
+                    .priority(50000)
+                    .build();
 
-        intentService.submit(toWanIntent);
-        log.info("Installed WAN intent: frr0 ({}) -> AS65000 ({})", frr0ConnectPoint, externalPort);
+            intentService.submit(toWanIntent);
+            log.info("Installed WAN intent: frr0 ({}) -> peer {} ({})", frr0ConnectPoint, peerIp, externalPort);
+        }
 
-        // Intent 2: AS65000 -> frr0 (traffic from WAN peer to frr0's WAN IP)
+        // Single inbound intent: WAN -> frr0 (traffic to frr0's WAN IP)
         TrafficSelector fromWanSelector = DefaultTrafficSelector.builder()
                 .matchEthType(Ethernet.TYPE_IPV4)
                 .matchIPDst(IpPrefix.valueOf(wanLocalIp4, 32))
@@ -1180,9 +1208,9 @@ public class AppComponent {
                 .build();
 
         intentService.submit(fromWanIntent);
-        log.info("Installed WAN intent: AS65000 ({}) -> frr0 ({})", externalPort, frr0ConnectPoint);
+        log.info("Installed WAN intent: WAN ({}) -> frr0 ({})", externalPort, frr0ConnectPoint);
 
-        log.info("WAN IPv4 forwarding intents installed: frr0 <-> AS65000");
+        log.info("WAN IPv4 forwarding intents installed for {} peers", wanPeerIp4List.size());
 
         // Note: IPv6 WAN forwarding is handled by the packet processor (lines 397-423)
         // We do not install intents for IPv6 WAN traffic because:
