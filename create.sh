@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# Network ID (e.g., 35 for AS65350/AS65351)
+# This is used for VXLAN tunnel IPs: 192.168.6X.NETWORK_ID
+NETWORK_ID=35
+
 # --- 1. Cleanup previous run ---
 # ./cleanup.sh > /dev/null 2>&1 || true
 
@@ -115,11 +119,11 @@ ip link set ovs2-ovs1-veth up
 
 # --- 5.1 VXLAN tunnel from ovs2 to ovs3 (via WireGuard) ---
 echo "Creating VXLAN tunnel to ovs3..."
-# local_ip: WireGuard interface IP (192.168.61.35)
-# remote_ip: ovs3's IP on the WireGuard network (192.168.60.35)
+# local_ip: WireGuard interface IP (192.168.61.${NETWORK_ID})
+# remote_ip: ovs3's IP on the WireGuard network (192.168.60.${NETWORK_ID})
 ovs-vsctl add-port ovs2 TO_TA_VXLAN -- set interface TO_TA_VXLAN type=vxlan \
-    options:remote_ip=192.168.60.35 \
-    options:local_ip=192.168.61.35
+    options:remote_ip=192.168.60.${NETWORK_ID} \
+    options:local_ip=192.168.61.${NETWORK_ID}
 
 
 # --- 6. Intra AS65351 Connection (r1 <-> h3) ---
