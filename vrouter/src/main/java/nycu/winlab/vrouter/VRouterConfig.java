@@ -47,13 +47,17 @@ public class VRouterConfig extends Config<ApplicationId> {
     private static final String PEER1_SDN_PREFIX = "peer1-sdn-prefix";
     private static final String PEER2_SDN_PREFIX = "peer2-sdn-prefix";
     private static final String LOCAL_SDN_PREFIX = "local-sdn-prefix";
+    private static final String PEER1_SDN_PREFIX6 = "peer1-sdn-prefix6";
+    private static final String PEER2_SDN_PREFIX6 = "peer2-sdn-prefix6";
+    private static final String LOCAL_SDN_PREFIX6 = "local-sdn-prefix6";
 
     @Override
     public boolean isValid() {
         return hasOnlyFields(FRR0_CONNECT_POINT, FRR1_CONNECT_POINT, FRR_ZERO_MAC, FRR_ZERO_IP4, FRR_ZERO_IP6,
                 VIRTUAL_GATEWAY_IP4, VIRTUAL_GATEWAY_IP6,
                 VIRTUAL_GATEWAY_MAC, WAN_CONNECT_POINT, V4_PEER, V6_PEER,
-                PEER1_VXLAN_CP, PEER2_VXLAN_CP, PEER1_SDN_PREFIX, PEER2_SDN_PREFIX, LOCAL_SDN_PREFIX);
+                PEER1_VXLAN_CP, PEER2_VXLAN_CP, PEER1_SDN_PREFIX, PEER2_SDN_PREFIX, LOCAL_SDN_PREFIX,
+                PEER1_SDN_PREFIX6, PEER2_SDN_PREFIX6, LOCAL_SDN_PREFIX6);
     }
 
     /**
@@ -193,6 +197,36 @@ public class VRouterConfig extends Config<ApplicationId> {
      */
     public IpPrefix localSdnPrefix() {
         String prefix = get(LOCAL_SDN_PREFIX, null);
+        return prefix != null ? IpPrefix.valueOf(prefix) : null;
+    }
+
+    /**
+     * Gets the peer 1 SDN IPv6 network prefix.
+     *
+     * @return IpPrefix or null if not configured
+     */
+    public IpPrefix peer1SdnPrefix6() {
+        String prefix = get(PEER1_SDN_PREFIX6, null);
+        return prefix != null ? IpPrefix.valueOf(prefix) : null;
+    }
+
+    /**
+     * Gets the peer 2 SDN IPv6 network prefix.
+     *
+     * @return IpPrefix or null if not configured
+     */
+    public IpPrefix peer2SdnPrefix6() {
+        String prefix = get(PEER2_SDN_PREFIX6, null);
+        return prefix != null ? IpPrefix.valueOf(prefix) : null;
+    }
+
+    /**
+     * Gets the local SDN IPv6 network prefix.
+     *
+     * @return IpPrefix or null if not configured
+     */
+    public IpPrefix localSdnPrefix6() {
+        String prefix = get(LOCAL_SDN_PREFIX6, null);
         return prefix != null ? IpPrefix.valueOf(prefix) : null;
     }
 

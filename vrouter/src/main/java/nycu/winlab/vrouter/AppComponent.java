@@ -179,6 +179,9 @@ public class AppComponent {
     private IpPrefix peer1SdnPrefix;
     private IpPrefix peer2SdnPrefix;
     private IpPrefix localSdnPrefix;
+    private IpPrefix peer1SdnPrefix6;
+    private IpPrefix peer2SdnPrefix6;
+    private IpPrefix localSdnPrefix6;
 
     private ConsistentMap<Ip4Address, MacAddress> ipToMacTable;
     private ConsistentMap<Ip6Address, MacAddress> ip6ToMacTable;
@@ -377,6 +380,13 @@ public class AppComponent {
             log.info("Loaded peer VXLAN config: peer1-cp={}, peer2-cp={}", peer1VxlanCp, peer2VxlanCp);
             log.info("Loaded peer SDN prefixes: peer1={}, peer2={}, local={}",
                     peer1SdnPrefix, peer2SdnPrefix, localSdnPrefix);
+
+            // Load peer IPv6 SDN prefixes
+            peer1SdnPrefix6 = config.peer1SdnPrefix6();
+            peer2SdnPrefix6 = config.peer2SdnPrefix6();
+            localSdnPrefix6 = config.localSdnPrefix6();
+            log.info("Loaded peer IPv6 SDN prefixes: peer1={}, peer2={}, local={}",
+                    peer1SdnPrefix6, peer2SdnPrefix6, localSdnPrefix6);
         }
     }
 
@@ -431,6 +441,22 @@ public class AppComponent {
         }
         if (peer2SdnPrefix != null && peer2VxlanCp != null &&
                 peer2SdnPrefix.contains(IpAddress.valueOf(dstIp.toString()))) {
+            return peer2VxlanCp;
+        }
+        return null;
+    }
+
+    /**
+     * Get the peer VXLAN connect point for an IPv6 destination.
+     * Returns null if destination is not in any peer SDN prefix.
+     */
+    private ConnectPoint getPeerVxlanForDestinationV6(Ip6Address dstIp) {
+        if (peer1SdnPrefix6 != null && peer1VxlanCp != null &&
+                peer1SdnPrefix6.contains(IpAddress.valueOf(dstIp.toString()))) {
+            return peer1VxlanCp;
+        }
+        if (peer2SdnPrefix6 != null && peer2VxlanCp != null &&
+                peer2SdnPrefix6.contains(IpAddress.valueOf(dstIp.toString()))) {
             return peer2VxlanCp;
         }
         return null;
@@ -519,6 +545,12 @@ public class AppComponent {
             if (eth.getEtherType() == Ethernet.TYPE_IPV6) {
                 ConnectPoint srcPoint = context.inPacket().receivedFrom();
                 IPv6 ipv6 = (IPv6) eth.getPayload();
+
+                // Handle incoming IPv6 from peer VXLAN ports
+                if (isPeerVxlanPort(srcPoint)) {
+                    handleIncomingPeerVxlanIPv6(context, eth);
+                    return;
+                }
 
                 // Handle traffic FROM WAN port (inbound)
                 if (externalPort != null && srcPoint.equals(externalPort)) {
@@ -850,6 +882,12 @@ public class AppComponent {
     private void handleNDP(PacketContext context, Ethernet eth) {
         ConnectPoint srcPoint = context.inPacket().receivedFrom();
 
+        // Block ALL NDP from peer VXLAN ports (L3 routing - no NDP needed across VXLAN)
+        if (isPeerVxlanPort(srcPoint)) {
+            log.debug("Blocked NDP from peer VXLAN port {}", srcPoint);
+            return;
+        }
+
         // Handle NDP packets from WAN port separately
         if (externalPort != null && srcPoint.equals(externalPort)) {
             handleWanNDP(context, eth);
@@ -990,6 +1028,35 @@ public class AppComponent {
     }
 
     /**
+     * Handle incoming IPv6 packets from peer VXLAN ports.
+     * Only allows traffic destined to local SDN network.
+     */
+    private void handleIncomingPeerVxlanIPv6(PacketContext context, Ethernet eth) {
+        IPv6 ipv6 = (IPv6) eth.getPayload();
+        Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
+        Ip6Address srcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
+
+        // Security: Only allow traffic destined to local SDN network
+        if (localSdnPrefix6 == null ||
+                !localSdnPrefix6.contains(IpAddress.valueOf(dstIp.toString()))) {
+            log.warn("Blocked IPv6 from peer VXLAN: dst {} not in local prefix {}", dstIp, localSdnPrefix6);
+            return;
+        }
+
+        log.info("Incoming peer VXLAN IPv6: {} -> {}", srcIp, dstIp);
+
+        // Route to local host - lookup MAC and forward
+        MacAddress dstMac = ip6ToMacTable.asJavaMap().get(dstIp);
+        if (dstMac != null) {
+            routePacket(context, eth, dstMac);
+        } else {
+            // Flood to find the host
+            log.warn("MAC not found for {} from peer VXLAN, flooding", dstIp);
+            flood(context);
+        }
+    }
+
+    /**
      * Route IPv4 packet to peer VXLAN port.
      * Rewrites MAC addresses and sends to the peer VXLAN connect point.
      */
@@ -1003,6 +1070,25 @@ public class AppComponent {
         routedPkt.setDestinationMACAddress(virtualGatewayMac);  // Same MAC convention
 
         log.info("Routing to peer VXLAN: {} -> {} via {}", srcIp, dstIp, peerCp);
+
+        // Send packet out to peer VXLAN port
+        packetOut(peerCp, routedPkt);
+    }
+
+    /**
+     * Route IPv6 packet to peer VXLAN port.
+     * Rewrites MAC addresses and sends to the peer VXLAN connect point.
+     */
+    private void routeToPeerVxlanV6(PacketContext context, Ethernet eth,
+                                     Ip6Address dstIp, ConnectPoint peerCp) {
+        Ip6Address srcIp = Ip6Address.valueOf(((IPv6) eth.getPayload()).getSourceAddress());
+
+        // Rewrite MACs: src=virtualGateway, dst=peer's virtualGateway (same MAC convention)
+        Ethernet routedPkt = eth.duplicate();
+        routedPkt.setSourceMACAddress(virtualGatewayMac);
+        routedPkt.setDestinationMACAddress(virtualGatewayMac);  // Same MAC convention
+
+        log.info("Routing IPv6 to peer VXLAN: {} -> {} via {}", srcIp, dstIp, peerCp);
 
         // Send packet out to peer VXLAN port
         packetOut(peerCp, routedPkt);
@@ -1084,6 +1170,13 @@ public class AppComponent {
         // Learn the source IP-MAC mapping (if not link-local)
         if (!srcIp.isLinkLocal()) {
             ip6ToMacTable.put(srcIp, srcMac);
+        }
+
+        // Check if destination is peer SDN network -> route to peer VXLAN
+        ConnectPoint peerVxlanCp = getPeerVxlanForDestinationV6(dstIp);
+        if (peerVxlanCp != null) {
+            routeToPeerVxlanV6(context, eth, dstIp, peerVxlanCp);
+            return;
         }
 
         // Query RouteService using longest prefix match
