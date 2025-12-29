@@ -1027,6 +1027,7 @@ public class AppComponent {
     /**
      * Handle incoming IPv4 packets from peer VXLAN ports.
      * Only allows traffic destined to local SDN network.
+     * Delegates to L3 routing logic since packets arrive with virtual gateway MAC.
      */
     private void handleIncomingPeerVxlanIPv4(PacketContext context, Ethernet eth) {
         IPv4 ipv4 = (IPv4) eth.getPayload();
@@ -1036,26 +1037,31 @@ public class AppComponent {
         // Security: Only allow traffic destined to local SDN network
         if (localSdnPrefix == null ||
                 !localSdnPrefix.contains(IpAddress.valueOf(dstIp.toString()))) {
-            log.warn("Blocked IPv4 from peer VXLAN: dst {} not in local prefix {}", dstIp, localSdnPrefix);
+            log.warn("Blocked IPv4 from peer VXLAN: dst {}, src {}", dstIp, srcIp);
             return;
         }
 
-        log.info("Incoming peer VXLAN IPv4: {} -> {}: dst MAC", srcIp, dstIp);
+        log.info("Incoming peer VXLAN IPv4: src {} -> dst {}: dst MAC: {}", srcIp, dstIp, eth.getDestinationMAC());
 
+        // TODO: Remove later, keep for reference
         // Route to local host - lookup MAC and forward
-        MacAddress dstMac = ipToMacTable.asJavaMap().get(dstIp);
-        if (dstMac != null) {
-            routePacket(context, eth, dstMac);
-        } else {
-            // Flood to find the host
-            log.warn("MAC not found for {} from peer VXLAN, flooding", dstIp);
-            flood(context);
-        }
+        // MacAddress dstMac = ipToMacTable.asJavaMap().get(dstIp);
+        // if (dstMac != null) {
+        //     routePacket(context, eth, dstMac);
+        // } else {
+        //     // Flood to find the host
+        //     log.warn("MAC not found for {} from peer VXLAN, flooding", dstIp);
+        //     flood(context);
+        // }
+
+        // Delegate to L3 routing - packet already has virtual gateway MAC as destination
+        handleL3RoutingIPv4(context, eth);
     }
 
     /**
      * Handle incoming IPv6 packets from peer VXLAN ports.
      * Only allows traffic destined to local SDN network.
+     * Delegates to L3 routing logic since packets arrive with virtual gateway MAC.
      */
     private void handleIncomingPeerVxlanIPv6(PacketContext context, Ethernet eth) {
         IPv6 ipv6 = (IPv6) eth.getPayload();
@@ -1069,17 +1075,20 @@ public class AppComponent {
             return;
         }
 
-        log.info("Incoming peer VXLAN IPv6: {} -> {}", srcIp, dstIp);
+        // TODO: Remove later, keep for reference
+        // // Route to local host - lookup MAC and forward
+        // MacAddress dstMac = ip6ToMacTable.asJavaMap().get(dstIp);
+        // if (dstMac != null) {
+        //     routePacket(context, eth, dstMac);
+        // } else {
+        //     // Flood to find the host
+        //     log.warn("MAC not found for {} from peer VXLAN, flooding", dstIp);
+        //     flood(context);
+        // }
+        log.info("Incoming peer VXLAN IPv6: src {} -> dst {}: dst MAC: {}", srcIp, dstIp, eth.getDestinationMAC());
 
-        // Route to local host - lookup MAC and forward
-        MacAddress dstMac = ip6ToMacTable.asJavaMap().get(dstIp);
-        if (dstMac != null) {
-            routePacket(context, eth, dstMac);
-        } else {
-            // Flood to find the host
-            log.warn("MAC not found for {} from peer VXLAN, flooding", dstIp);
-            flood(context);
-        }
+        // Delegate to L3 routing - packet already has virtual gateway MAC as destination
+        handleL3RoutingIPv6(context, eth);
     }
 
     /**
@@ -1134,7 +1143,7 @@ public class AppComponent {
         Ip4Address srcIp = Ip4Address.valueOf(ipv4.getSourceAddress());
         MacAddress srcMac = eth.getSourceMAC();
 
-        log.info("L3 Routing IPv4: {} -> {}", srcIp, dstIp);
+        log.info("[Gateway] L3 Routing IPv4: {} -> {}", srcIp, dstIp);
 
         // Learn the source IP-MAC mapping
         ipToMacTable.put(srcIp, srcMac);
@@ -1152,7 +1161,7 @@ public class AppComponent {
         if (routeOpt.isPresent()) {
             ResolvedRoute route = routeOpt.get();
             nextHop = route.nextHop();
-            log.info("L3 IPv4 RouteService HIT: IP {}, Prefix {}, Next-Hop {}",
+            log.info("[Gateway] L3 IPv4 RouteService HIT: IP {}, Prefix {}, Next-Hop {}",
                     dstIp, route.prefix(), nextHop);
         }
 
@@ -1161,26 +1170,26 @@ public class AppComponent {
         if (nextHop != null) {
             dstMac = ipToMacTable.asJavaMap().get(nextHop.getIp4Address());
             if (dstMac == null) {
-                log.warn("L3 IPv4: MAC for next-hop {} not found. Packet may be dropped.", nextHop);
+                log.warn("[Gateway] L3 IPv4: MAC for next-hop {} not found. Packet may be dropped.", nextHop);
                 // Optional: We could trigger an ARP for the next-hop here
             }
         } else {
             // Fallback to original logic if RouteService has no entry
-            log.info("L3 IPv4 RouteService MISS: IP {}. Falling back to local table/default route.", dstIp);
+            log.info("[Gateway] L3 IPv4 RouteService MISS: IP {}. Falling back to local table/default route.", dstIp);
             dstMac = ipToMacTable.asJavaMap().get(dstIp);
         }
 
         if (dstMac != null) {
             // We found a MAC, either for the final destination or the next-hop router
-            log.info("L3 IPv4 LOCAL/NEXT-HOP: Found MAC {}. Routing packet.", dstMac);
+            log.info("[Gateway] L3 IPv4 LOCAL/NEXT-HOP: Found MAC {}. Routing packet.", dstMac);
             routePacket(context, eth, dstMac);
         } else if (frr0Mac != null) {
             // Default route: forward to the pre-configured Quagga/FRR router
-            log.info("L3 IPv4 REMOTE: IP {} not in table. Forwarding to default frr0 router (MAC={})", dstIp, frr0Mac);
+            log.info("[Gateway] L3 IPv4 REMOTE: IP {} not in table. Forwarding to default frr0 router (MAC={})", dstIp, frr0Mac);
             routePacket(context, eth, frr0Mac);
         } else {
             // No route and no default, flood as a last resort
-            log.warn("L3 IPv4: Cannot route to {}. No route, no MAC, and no default router configured.", dstIp);
+            log.warn("[Gateway] L3 IPv4: Cannot route to {}. No route, no MAC, and no default router configured.", dstIp);
             flood(context);
         }
     }
@@ -1195,7 +1204,7 @@ public class AppComponent {
         Ip6Address srcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
         MacAddress srcMac = eth.getSourceMAC();
 
-        log.info("L3 Routing IPv6: {} -> {}", srcIp, dstIp);
+        log.info("[Gateway] L3 Routing IPv6: {} -> {}", srcIp, dstIp);
 
         // Learn the source IP-MAC mapping (if not link-local)
         if (!srcIp.isLinkLocal()) {
@@ -1215,7 +1224,7 @@ public class AppComponent {
         if (routeOpt.isPresent()) {
             ResolvedRoute route = routeOpt.get();
             nextHop = route.nextHop();
-            log.info("L3 IPv6 RouteService HIT: IP {}, Prefix {}, Next-Hop {}",
+            log.info("[Gateway] L3 IPv6 RouteService HIT: IP {}, Prefix {}, Next-Hop {}",
                     dstIp, route.prefix(), nextHop);
         }
 
@@ -1224,26 +1233,26 @@ public class AppComponent {
         if (nextHop != null) {
             dstMac = ip6ToMacTable.asJavaMap().get(nextHop.getIp6Address());
             if (dstMac == null) {
-                log.warn("L3 IPv6: MAC for next-hop {} not found. Packet may be dropped.", nextHop);
+                log.warn("[Gateway] L3 IPv6: MAC for next-hop {} not found. Packet may be dropped.", nextHop);
                 // Optional: We could trigger an NDP for the next-hop here
             }
         } else {
             // Fallback to original logic if RouteService has no entry
-            log.info("L3 IPv6 RouteService MISS: IP {}. Falling back to local table/default route.", dstIp);
+            log.info("[Gateway] L3 IPv6 RouteService MISS: IP {}. Falling back to local table/default route.", dstIp);
             dstMac = ip6ToMacTable.asJavaMap().get(dstIp);
         }
 
         if (dstMac != null) {
             // We found a MAC, either for the final destination or the next-hop router
-            log.info("L3 IPv6 LOCAL/NEXT-HOP: Found MAC {}. Routing packet.", dstMac);
+            log.info("[Gateway] L3 IPv6 LOCAL/NEXT-HOP: Found MAC {}. Routing packet.", dstMac);
             routePacket(context, eth, dstMac);
         } else if (frr0Mac != null) {
             // Default route: forward to the pre-configured Quagga/FRR router
-            log.info("L3 IPv6 REMOTE: IP {} not in table. Forwarding to default frr0 router (MAC={})", dstIp, frr0Mac);
+            log.info("[Gateway] L3 IPv6 REMOTE: IP {} not in table. Forwarding to default frr0 router (MAC={})", dstIp, frr0Mac);
             routePacket(context, eth, frr0Mac);
         } else {
             // No route and no default, flood as a last resort
-            log.warn("L3 IPv6: Cannot route to {}. No route, no MAC, and no default router configured.", dstIp);
+            log.warn("[Gateway] L3 IPv6: Cannot route to {}. No route, no MAC, and no default router configured.", dstIp);
             flood(context);
         }
     }
@@ -1339,14 +1348,14 @@ public class AppComponent {
         MacAddress dstMac = ethPkt.getDestinationMAC();
 
         // Receive packet-in from new device, create new table for it
-        log.info("Received a packet-in from device `{}`.", recDevId.toString());
+        log.info("[Learning Bridge] Received a packet-in from device `{}`.", recDevId.toString());
         if (bridgeTable.get(recDevId) == null) {
             bridgeTable.put(recDevId, new HashMap<>());
         }
 
         // Learn source MAC address
         if (bridgeTable.get(recDevId).get(srcMac) == null) {
-            log.info("Add an entry to the port table of `{}`. MAC address: `{}` => Port: `{}`.",
+            log.info("[Learning Bridge] Add an entry to the port table of `{}`. MAC address: `{}` => Port: `{}`.",
                     recDevId.toString(), srcMac.toString(), recPort.toString());
 
             bridgeTable.get(recDevId).put(srcMac, recPort);
@@ -1355,13 +1364,13 @@ public class AppComponent {
         // Forward based on destination MAC
         if (bridgeTable.get(recDevId).get(dstMac) == null) {
             // MAC address not found, flood the packet
-            log.info("MAC address `{}` is missed on `{}`. Flood the packet.", dstMac.toString(),
+            log.info("[Learning Bridge] MAC address `{}` is missed on `{}`. Flood the packet.", dstMac.toString(),
                     recDevId.toString());
             flood(context);
 
         } else {
             // MAC address found, install flow rule
-            log.info("MAC address `{}` is matched on `{}`. Install a flow rule.", dstMac.toString(),
+            log.info("[Learning Bridge] MAC address `{}` is matched on `{}`. Install a flow rule.", dstMac.toString(),
                     recDevId.toString());
             installRule(context, bridgeTable.get(recDevId).get(dstMac));
         }
