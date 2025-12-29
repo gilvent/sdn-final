@@ -17,6 +17,7 @@ package nycu.winlab.vrouter;
 
 import org.onlab.packet.Ip4Address;
 import org.onlab.packet.Ip6Address;
+import org.onlab.packet.IpPrefix;
 import org.onlab.packet.MacAddress;
 import org.onosproject.core.ApplicationId;
 import org.onosproject.net.ConnectPoint;
@@ -41,12 +42,18 @@ public class VRouterConfig extends Config<ApplicationId> {
     private static final String WAN_CONNECT_POINT = "wan-connect-point";
     private static final String V4_PEER = "v4-peer";
     private static final String V6_PEER = "v6-peer";
+    private static final String PEER1_VXLAN_CP = "peer1-vxlan-cp";
+    private static final String PEER2_VXLAN_CP = "peer2-vxlan-cp";
+    private static final String PEER1_SDN_PREFIX = "peer1-sdn-prefix";
+    private static final String PEER2_SDN_PREFIX = "peer2-sdn-prefix";
+    private static final String LOCAL_SDN_PREFIX = "local-sdn-prefix";
 
     @Override
     public boolean isValid() {
         return hasOnlyFields(FRR0_CONNECT_POINT, FRR1_CONNECT_POINT, FRR_ZERO_MAC, FRR_ZERO_IP4, FRR_ZERO_IP6,
                 VIRTUAL_GATEWAY_IP4, VIRTUAL_GATEWAY_IP6,
-                VIRTUAL_GATEWAY_MAC, WAN_CONNECT_POINT, V4_PEER, V6_PEER);
+                VIRTUAL_GATEWAY_MAC, WAN_CONNECT_POINT, V4_PEER, V6_PEER,
+                PEER1_VXLAN_CP, PEER2_VXLAN_CP, PEER1_SDN_PREFIX, PEER2_SDN_PREFIX, LOCAL_SDN_PREFIX);
     }
 
     /**
@@ -137,6 +144,56 @@ public class VRouterConfig extends Config<ApplicationId> {
     public ConnectPoint externalPort() {
         String port = get(WAN_CONNECT_POINT, null);
         return port != null ? ConnectPoint.deviceConnectPoint(port) : null;
+    }
+
+    /**
+     * Gets the peer 1 VXLAN connect point.
+     *
+     * @return ConnectPoint or null if not configured
+     */
+    public ConnectPoint peer1VxlanCp() {
+        String port = get(PEER1_VXLAN_CP, null);
+        return port != null ? ConnectPoint.deviceConnectPoint(port) : null;
+    }
+
+    /**
+     * Gets the peer 2 VXLAN connect point.
+     *
+     * @return ConnectPoint or null if not configured
+     */
+    public ConnectPoint peer2VxlanCp() {
+        String port = get(PEER2_VXLAN_CP, null);
+        return port != null ? ConnectPoint.deviceConnectPoint(port) : null;
+    }
+
+    /**
+     * Gets the peer 1 SDN network prefix.
+     *
+     * @return IpPrefix or null if not configured
+     */
+    public IpPrefix peer1SdnPrefix() {
+        String prefix = get(PEER1_SDN_PREFIX, null);
+        return prefix != null ? IpPrefix.valueOf(prefix) : null;
+    }
+
+    /**
+     * Gets the peer 2 SDN network prefix.
+     *
+     * @return IpPrefix or null if not configured
+     */
+    public IpPrefix peer2SdnPrefix() {
+        String prefix = get(PEER2_SDN_PREFIX, null);
+        return prefix != null ? IpPrefix.valueOf(prefix) : null;
+    }
+
+    /**
+     * Gets the local SDN network prefix.
+     *
+     * @return IpPrefix or null if not configured
+     */
+    public IpPrefix localSdnPrefix() {
+        String prefix = get(LOCAL_SDN_PREFIX, null);
+        return prefix != null ? IpPrefix.valueOf(prefix) : null;
     }
 
     /**

@@ -173,6 +173,13 @@ public class AppComponent {
     // Stores pairs of [localIp, peerIp] for internal BGP peering
     private List<Ip6Address[]> internalV6Peers = new ArrayList<>();
 
+    // Peer VXLAN configuration (for peer network communication)
+    private ConnectPoint peer1VxlanCp;
+    private ConnectPoint peer2VxlanCp;
+    private IpPrefix peer1SdnPrefix;
+    private IpPrefix peer2SdnPrefix;
+    private IpPrefix localSdnPrefix;
+
     private ConsistentMap<Ip4Address, MacAddress> ipToMacTable;
     private ConsistentMap<Ip6Address, MacAddress> ip6ToMacTable;
     private Map<DeviceId, Map<MacAddress, PortNumber>> bridgeTable = new HashMap<>();
@@ -360,6 +367,16 @@ public class AppComponent {
 
             // Install internal peer forwarding intents
             installInternalPeerForwardingIntents();
+
+            // Load peer VXLAN configuration
+            peer1VxlanCp = config.peer1VxlanCp();
+            peer2VxlanCp = config.peer2VxlanCp();
+            peer1SdnPrefix = config.peer1SdnPrefix();
+            peer2SdnPrefix = config.peer2SdnPrefix();
+            localSdnPrefix = config.localSdnPrefix();
+            log.info("Loaded peer VXLAN config: peer1-cp={}, peer2-cp={}", peer1VxlanCp, peer2VxlanCp);
+            log.info("Loaded peer SDN prefixes: peer1={}, peer2={}, local={}",
+                    peer1SdnPrefix, peer2SdnPrefix, localSdnPrefix);
         }
     }
 
@@ -395,6 +412,30 @@ public class AppComponent {
         return true;
     }
 
+    /**
+     * Check if the connect point is a peer VXLAN port.
+     */
+    private boolean isPeerVxlanPort(ConnectPoint cp) {
+        return (peer1VxlanCp != null && cp.equals(peer1VxlanCp)) ||
+               (peer2VxlanCp != null && cp.equals(peer2VxlanCp));
+    }
+
+    /**
+     * Get the peer VXLAN connect point for a destination IP.
+     * Returns null if destination is not in any peer SDN prefix.
+     */
+    private ConnectPoint getPeerVxlanForDestination(Ip4Address dstIp) {
+        if (peer1SdnPrefix != null && peer1VxlanCp != null &&
+                peer1SdnPrefix.contains(IpAddress.valueOf(dstIp.toString()))) {
+            return peer1VxlanCp;
+        }
+        if (peer2SdnPrefix != null && peer2VxlanCp != null &&
+                peer2SdnPrefix.contains(IpAddress.valueOf(dstIp.toString()))) {
+            return peer2VxlanCp;
+        }
+        return null;
+    }
+
     private class VRouterPacketProcessor implements PacketProcessor {
         @Override
         public void process(PacketContext context) {
@@ -428,6 +469,12 @@ public class AppComponent {
             // Handle IPv4 packets
             if (eth.getEtherType() == Ethernet.TYPE_IPV4) {
                 ConnectPoint srcPoint = context.inPacket().receivedFrom();
+
+                // Handle incoming IPv4 from peer VXLAN ports
+                if (isPeerVxlanPort(srcPoint)) {
+                    handleIncomingPeerVxlanIPv4(context, eth);
+                    return;
+                }
 
                 // Block IPv4 from WAN port that isn't destined for frr0's WAN IP
                 if (externalPort != null && srcPoint.equals(externalPort)) {
@@ -586,6 +633,12 @@ public class AppComponent {
 
     private void handleARP(PacketContext context, Ethernet eth) {
         ConnectPoint srcPoint = context.inPacket().receivedFrom();
+
+        // Block ALL ARP from peer VXLAN ports (L3 routing - no ARP needed across VXLAN)
+        if (isPeerVxlanPort(srcPoint)) {
+            log.debug("Blocked ARP from peer VXLAN port {}", srcPoint);
+            return;
+        }
 
         // Handle ARP packets from WAN port separately
         if (externalPort != null && srcPoint.equals(externalPort)) {
@@ -908,6 +961,54 @@ public class AppComponent {
     }
 
     /**
+     * Handle incoming IPv4 packets from peer VXLAN ports.
+     * Only allows traffic destined to local SDN network.
+     */
+    private void handleIncomingPeerVxlanIPv4(PacketContext context, Ethernet eth) {
+        IPv4 ipv4 = (IPv4) eth.getPayload();
+        Ip4Address dstIp = Ip4Address.valueOf(ipv4.getDestinationAddress());
+        Ip4Address srcIp = Ip4Address.valueOf(ipv4.getSourceAddress());
+
+        // Security: Only allow traffic destined to local SDN network
+        if (localSdnPrefix == null ||
+                !localSdnPrefix.contains(IpAddress.valueOf(dstIp.toString()))) {
+            log.warn("Blocked IPv4 from peer VXLAN: dst {} not in local prefix {}", dstIp, localSdnPrefix);
+            return;
+        }
+
+        log.info("Incoming peer VXLAN IPv4: {} -> {}", srcIp, dstIp);
+
+        // Route to local host - lookup MAC and forward
+        MacAddress dstMac = ipToMacTable.asJavaMap().get(dstIp);
+        if (dstMac != null) {
+            routePacket(context, eth, dstMac);
+        } else {
+            // Flood to find the host
+            log.warn("MAC not found for {} from peer VXLAN, flooding", dstIp);
+            flood(context);
+        }
+    }
+
+    /**
+     * Route IPv4 packet to peer VXLAN port.
+     * Rewrites MAC addresses and sends to the peer VXLAN connect point.
+     */
+    private void routeToPeerVxlan(PacketContext context, Ethernet eth,
+                                   Ip4Address dstIp, ConnectPoint peerCp) {
+        Ip4Address srcIp = Ip4Address.valueOf(((IPv4) eth.getPayload()).getSourceAddress());
+
+        // Rewrite MACs: src=virtualGateway, dst=peer's virtualGateway (same MAC convention)
+        Ethernet routedPkt = eth.duplicate();
+        routedPkt.setSourceMACAddress(virtualGatewayMac);
+        routedPkt.setDestinationMACAddress(virtualGatewayMac);  // Same MAC convention
+
+        log.info("Routing to peer VXLAN: {} -> {} via {}", srcIp, dstIp, peerCp);
+
+        // Send packet out to peer VXLAN port
+        packetOut(peerCp, routedPkt);
+    }
+
+    /**
      * Handle L3 routing for IPv4 packets destined to the virtual gateway.
      * Rewrites MAC addresses and forwards to the appropriate destination.
      */
@@ -921,6 +1022,13 @@ public class AppComponent {
 
         // Learn the source IP-MAC mapping
         ipToMacTable.put(srcIp, srcMac);
+
+        // Check if destination is peer SDN network -> route to peer VXLAN
+        ConnectPoint peerVxlanCp = getPeerVxlanForDestination(dstIp);
+        if (peerVxlanCp != null) {
+            routeToPeerVxlan(context, eth, dstIp, peerVxlanCp);
+            return;
+        }
 
         // Query RouteService using longest prefix match
         Optional<ResolvedRoute> routeOpt = routeService.longestPrefixLookup(dstIp);

@@ -4,6 +4,8 @@ set -e
 # Network ID (e.g., 35 for AS65350/AS65351)
 # This is used for VXLAN tunnel IPs: 192.168.6X.NETWORK_ID
 NETWORK_ID=35
+PEER1_NETWORK_ID=34
+PEER2_NETWORK_ID=36
 
 # --- 1. Cleanup previous run ---
 # ./cleanup.sh > /dev/null 2>&1 || true
@@ -124,6 +126,15 @@ echo "Creating VXLAN tunnel to ovs3..."
 ovs-vsctl add-port ovs2 TO_TA_VXLAN -- set interface TO_TA_VXLAN type=vxlan \
     options:remote_ip=192.168.60.${NETWORK_ID} \
     options:local_ip=192.168.61.${NETWORK_ID}
+
+ovs-vsctl add-port ovs2 TO_${PEER1_NETWORK_ID}_VXLAN -- set interface TO_${PEER1_NETWORK_ID}_VXLAN type=vxlan \
+    options:remote_ip=192.168.61.${PEER1_NETWORK_ID} \
+    options:local_ip=192.168.61.${NETWORK_ID}
+
+ovs-vsctl add-port ovs2 TO_${PEER2_NETWORK_ID}_VXLAN -- set interface TO_${PEER2_NETWORK_ID}_VXLAN type=vxlan \
+    options:remote_ip=192.168.61.${PEER2_NETWORK_ID} \
+    options:local_ip=192.168.61.${NETWORK_ID}
+
 
 
 # --- 6. Intra AS65351 Connection (r1 <-> h3) ---

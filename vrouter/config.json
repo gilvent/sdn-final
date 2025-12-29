@@ -21,7 +21,12 @@
           "fd70::35, fd70::36",
           "fd63::1, fd63::2"
         ],
-        "frr1-connect-point": "of:0000000000000001/5"
+        "frr1-connect-point": "of:0000000000000001/5",
+        "peer1-vxlan-cp": "of:0000000000000002/4",
+        "peer2-vxlan-cp": "of:0000000000000002/5",
+        "peer1-sdn-prefix": "172.16.34.0/24",
+        "peer2-sdn-prefix": "172.16.36.0/24",
+        "local-sdn-prefix": "172.16.35.0/24"
       }
     }
   },
