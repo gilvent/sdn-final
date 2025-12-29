@@ -3,12 +3,12 @@
     "nycu.winlab.vrouter": {
       "vrouter": {
         "frr0-connect-point": "of:0000000000000001/2",
-        "frr0-mac": "00:00:00:00:00:01",
+        "frr0-mac": "00:00:00:00:35:01",
         "frr0-ip4": "172.16.35.69",
         "frr0-ip6": "2a0b:4e07:c4:35::69",
         "virtual-gateway-ip4": "172.16.35.1",
         "virtual-gateway-ip6": "2a0b:4e07:c4:35::1",
-        "virtual-gateway-mac": "00:00:00:00:00:02",
+        "virtual-gateway-mac": "00:00:00:00:35:02",
         "wan-connect-point": "of:0000ceaa83f3a445/3",
         "v4-peer": [
           "192.168.70.35, 192.168.70.253",
@@ -29,7 +29,9 @@
         "local-sdn-prefix": "172.16.35.0/24",
         "peer1-sdn-prefix6": "2a0b:4e07:c4:34::/64",
         "peer2-sdn-prefix6": "2a0b:4e07:c4:36::/64",
-        "local-sdn-prefix6": "2a0b:4e07:c4:35::/64"
+        "local-sdn-prefix6": "2a0b:4e07:c4:35::/64",
+        "peer1-gateway-mac": "00:00:00:00:34:02",
+        "peer2-gateway-mac": "00:00:00:00:36:02"
       }
     }
   },

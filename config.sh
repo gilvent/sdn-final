@@ -54,7 +54,7 @@ dexec frr0 ip addr add 192.168.70.${NETWORK_ID}/24 dev ${R0_IF_OVS1}  # For VXLA
 
 # Set MAC address on frr0's eth0
 # This MAC matches the MAC configured in the vrouter ONOS app
-dexec frr0 ip link set ${R0_IF_OVS1} address 00:00:00:00:00:01
+dexec frr0 ip link set ${R0_IF_OVS1} address 00:00:00:00:${NETWORK_ID}:01
 
 
 # --- 4. Inter-AS Link (r1 <-> ovs1) ---

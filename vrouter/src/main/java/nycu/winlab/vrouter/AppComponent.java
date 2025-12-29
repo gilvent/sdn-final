@@ -182,6 +182,8 @@ public class AppComponent {
     private IpPrefix peer1SdnPrefix6;
     private IpPrefix peer2SdnPrefix6;
     private IpPrefix localSdnPrefix6;
+    private MacAddress peer1GatewayMac;
+    private MacAddress peer2GatewayMac;
 
     private ConsistentMap<Ip4Address, MacAddress> ipToMacTable;
     private ConsistentMap<Ip6Address, MacAddress> ip6ToMacTable;
@@ -387,6 +389,12 @@ public class AppComponent {
             localSdnPrefix6 = config.localSdnPrefix6();
             log.info("Loaded peer IPv6 SDN prefixes: peer1={}, peer2={}, local={}",
                     peer1SdnPrefix6, peer2SdnPrefix6, localSdnPrefix6);
+
+            // Load peer gateway MACs
+            peer1GatewayMac = config.peer1GatewayMac();
+            peer2GatewayMac = config.peer2GatewayMac();
+            log.info("Loaded peer gateway MACs: peer1={}, peer2={}",
+                    peer1GatewayMac, peer2GatewayMac);
         }
     }
 
@@ -460,6 +468,24 @@ public class AppComponent {
             return peer2VxlanCp;
         }
         return null;
+    }
+
+    /**
+     * Get the gateway MAC address for a peer VXLAN connect point.
+     * Returns the peer-specific gateway MAC if configured, otherwise falls back to virtualGatewayMac.
+     *
+     * @param peerCp The peer VXLAN connect point
+     * @return Gateway MAC address for the peer, or virtualGatewayMac if not configured
+     */
+    private MacAddress getPeerGatewayMac(ConnectPoint peerCp) {
+        if (peer1VxlanCp != null && peerCp.equals(peer1VxlanCp)) {
+            return peer1GatewayMac != null ? peer1GatewayMac : virtualGatewayMac;
+        }
+        if (peer2VxlanCp != null && peerCp.equals(peer2VxlanCp)) {
+            return peer2GatewayMac != null ? peer2GatewayMac : virtualGatewayMac;
+        }
+        log.warn("Unknown peer VXLAN CP: {}. Using virtualGatewayMac", peerCp);
+        return virtualGatewayMac;
     }
 
     private class VRouterPacketProcessor implements PacketProcessor {
@@ -785,7 +811,7 @@ public class AppComponent {
 
             // Forward ARP reply to frr0 connect point
             if (frr0ConnectPoint != null) {
-                log.info("Forwarding WAN ARP Reply to frr0 at {}", frr0ConnectPoint);
+                log.info("Forwarding WAN ARP Reply from {} to frr0 at {}", srcIp, frr0ConnectPoint);
                 packetOut(frr0ConnectPoint, eth);
             }
             return;
@@ -1014,7 +1040,7 @@ public class AppComponent {
             return;
         }
 
-        log.info("Incoming peer VXLAN IPv4: {} -> {}", srcIp, dstIp);
+        log.info("Incoming peer VXLAN IPv4: {} -> {}: dst MAC", srcIp, dstIp);
 
         // Route to local host - lookup MAC and forward
         MacAddress dstMac = ipToMacTable.asJavaMap().get(dstIp);
@@ -1039,7 +1065,7 @@ public class AppComponent {
         // Security: Only allow traffic destined to local SDN network
         if (localSdnPrefix6 == null ||
                 !localSdnPrefix6.contains(IpAddress.valueOf(dstIp.toString()))) {
-            log.warn("Blocked IPv6 from peer VXLAN: dst {} not in local prefix {}", dstIp, localSdnPrefix6);
+            // log.warn("Blocked IPv6 from peer VXLAN: dst {} not in local prefix {}", dstIp, localSdnPrefix6);
             return;
         }
 
@@ -1064,12 +1090,14 @@ public class AppComponent {
                                    Ip4Address dstIp, ConnectPoint peerCp) {
         Ip4Address srcIp = Ip4Address.valueOf(((IPv4) eth.getPayload()).getSourceAddress());
 
-        // Rewrite MACs: src=virtualGateway, dst=peer's virtualGateway (same MAC convention)
+        // Rewrite MACs: src=virtualGateway, dst=peer's gateway MAC (from config)
+        MacAddress peerGatewayMac = getPeerGatewayMac(peerCp);
         Ethernet routedPkt = eth.duplicate();
         routedPkt.setSourceMACAddress(virtualGatewayMac);
-        routedPkt.setDestinationMACAddress(virtualGatewayMac);  // Same MAC convention
+        routedPkt.setDestinationMACAddress(peerGatewayMac);
 
-        log.info("Routing to peer VXLAN: {} -> {} via {}", srcIp, dstIp, peerCp);
+        log.info("Routing to peer VXLAN: {} -> {} via {} (peer gateway MAC: {})",
+                srcIp, dstIp, peerCp, peerGatewayMac);
 
         // Send packet out to peer VXLAN port
         packetOut(peerCp, routedPkt);
@@ -1083,12 +1111,14 @@ public class AppComponent {
                                      Ip6Address dstIp, ConnectPoint peerCp) {
         Ip6Address srcIp = Ip6Address.valueOf(((IPv6) eth.getPayload()).getSourceAddress());
 
-        // Rewrite MACs: src=virtualGateway, dst=peer's virtualGateway (same MAC convention)
+        // Rewrite MACs: src=virtualGateway, dst=peer's gateway MAC (from config)
+        MacAddress peerGatewayMac = getPeerGatewayMac(peerCp);
         Ethernet routedPkt = eth.duplicate();
         routedPkt.setSourceMACAddress(virtualGatewayMac);
-        routedPkt.setDestinationMACAddress(virtualGatewayMac);  // Same MAC convention
+        routedPkt.setDestinationMACAddress(peerGatewayMac);
 
-        log.info("Routing IPv6 to peer VXLAN: {} -> {} via {}", srcIp, dstIp, peerCp);
+        log.info("Routing IPv6 to peer VXLAN: {} -> {} via {} (peer gateway MAC: {})",
+                srcIp, dstIp, peerCp, peerGatewayMac);
 
         // Send packet out to peer VXLAN port
         packetOut(peerCp, routedPkt);

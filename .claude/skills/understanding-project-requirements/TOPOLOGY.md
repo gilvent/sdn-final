@@ -31,7 +31,7 @@ The environment consists of two main Autonomous Systems (AS), an SDN controller,
 -   **Docker Container**: `onos`
 -   **Connection**: Manages `ovs1` and `ovs2` via OpenFlow, listening on `tcp:127.0.0.1:6653`.
 -   **vRouter App**: Provides a virtual gateway for hosts in AS65xx0.
-    -   **Virtual Gateway MAC**: `00:00:00:00:00:02`
+    -   **Virtual Gateway MAC**: `00:00:00:00:xx:02`
     -   **Virtual Gateway IPv4**: `172.16.xx.1`
     -   **Virtual Gateway IPv6**: `2a0b:4e07:c4:xx::1`
 
@@ -64,7 +64,7 @@ The environment consists of two main Autonomous Systems (AS), an SDN controller,
 -   **BGP AS**: `65xx0`
 -   **Router-ID**: `192.168.63.1`
 -   **Connection**: `ovs1` (on interface `eth0`)
--   **MAC Address**: `00:00:00:00:00:01`
+-   **MAC Address**: `00:00:00:00:xx:01`
 -   **IP Addresses on `eth0`**:
     -   `192.168.63.1/24` (for peering with `frr1`)
     -   `172.16.xx.69/24` (for routing from vRouter)
