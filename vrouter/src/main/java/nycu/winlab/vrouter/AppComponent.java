@@ -165,9 +165,9 @@ public class AppComponent {
     private ConnectPoint frr0ConnectPoint; // Connect point where frr0 is connected
     private ConnectPoint frr1ConnectPoint; // Connect point where frr1 is connected
 
-    // WAN IPv6 peering configuration (for AS65000 BGP over IPv6)
+    // WAN IPv6 peering configuration (for AS65000, AS65340, AS65360 BGP over IPv6)
     private Ip6Address wanLocalIp6;       // frr0's IPv6 on WAN subnet (fd70::35)
-    private Ip6Address wanPeerIp6;        // AS65000 BGP speaker IPv6 (fd70::fe)
+    private List<Ip6Address> wanPeerIp6List = new ArrayList<>();  // BGP peer IPv6s
 
     // Internal IPv6 peer configuration (for inter-AS BGP, e.g., frr0 <-> frr1)
     // Stores pairs of [localIp, peerIp] for internal BGP peering
@@ -310,26 +310,33 @@ public class AppComponent {
                 log.info("Pre-populated WAN local IPv4 mapping: {} -> {}", wanLocalIp4, frr0Mac);
             }
 
-            // Parse v6-peer to get WAN IPv6 local and peer addresses
-            // First entry is WAN peering (AS65000), subsequent entries are internal peers
+            // Parse v6-peer to get WAN IPv6 and internal peer addresses
+            // Format: ["fd70::35, fd70::fe", "fd70::35, fd70::34", "fd70::35, fd70::36", "fd63::1, fd63::2"]
+            // Entries with same /64 prefix as first entry's local IP are WAN peers, others are internal
             List<String[]> v6Peers = config.v6Peers();
             if (v6Peers != null && !v6Peers.isEmpty()) {
-                // First entry: WAN peering (fd70::35 <-> fd70::fe)
-                String[] peer = v6Peers.get(0);
-                wanLocalIp6 = Ip6Address.valueOf(peer[0]);
-                wanPeerIp6 = Ip6Address.valueOf(peer[1]);
-                log.info("Loaded WAN IPv6 peering config: local={}, peer={}", wanLocalIp6, wanPeerIp6);
+                // First entry sets local IP for WAN subnet
+                String[] firstPeer = v6Peers.get(0);
+                wanLocalIp6 = Ip6Address.valueOf(firstPeer[0]);
 
-                // Clear previous internal peers
+                // Clear previous peers
+                wanPeerIp6List.clear();
                 internalV6Peers.clear();
 
-                // Subsequent entries: internal peers (e.g., fd63::1 <-> fd63::2)
-                for (int i = 1; i < v6Peers.size(); i++) {
-                    String[] internalPeer = v6Peers.get(i);
-                    Ip6Address localIp = Ip6Address.valueOf(internalPeer[0]);
-                    Ip6Address peerIp = Ip6Address.valueOf(internalPeer[1]);
-                    internalV6Peers.add(new Ip6Address[]{localIp, peerIp});
-                    log.info("Loaded internal IPv6 peering config: local={}, peer={}", localIp, peerIp);
+                // Classify peers based on /64 subnet
+                for (String[] peer : v6Peers) {
+                    Ip6Address localIp = Ip6Address.valueOf(peer[0]);
+                    Ip6Address peerIp = Ip6Address.valueOf(peer[1]);
+
+                    // Check if this is a WAN peer (same /64 as wanLocalIp6)
+                    if (isSameSubnet64(localIp, wanLocalIp6)) {
+                        wanPeerIp6List.add(peerIp);
+                        log.info("Loaded WAN IPv6 peer: local={}, peer={}", localIp, peerIp);
+                    } else {
+                        // This is an internal peer
+                        internalV6Peers.add(new Ip6Address[]{localIp, peerIp});
+                        log.info("Loaded internal IPv6 peering config: local={}, peer={}", localIp, peerIp);
+                    }
                 }
             }
 
@@ -370,6 +377,22 @@ public class AppComponent {
                 }
             }
         }
+    }
+
+    /**
+     * Check if two IPv6 addresses are in the same /64 subnet.
+     */
+    private boolean isSameSubnet64(Ip6Address ip1, Ip6Address ip2) {
+        byte[] bytes1 = ip1.toOctets();
+        byte[] bytes2 = ip2.toOctets();
+
+        // Compare first 8 bytes (64 bits)
+        for (int i = 0; i < 8; i++) {
+            if (bytes1[i] != bytes2[i]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private class VRouterPacketProcessor implements PacketProcessor {
@@ -479,14 +502,16 @@ public class AppComponent {
                 }
 
                 // Handle traffic TO WAN port (outbound from frr0)
-                if (wanPeerIp6 != null && frr0ConnectPoint != null && srcPoint.equals(frr0ConnectPoint)) {
+                if (!wanPeerIp6List.isEmpty() && frr0ConnectPoint != null && srcPoint.equals(frr0ConnectPoint)) {
                     Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
 
-                    // Forward traffic destined to WAN peer to external port
-                    if (dstIp.equals(wanPeerIp6)) {
-                        log.info("Forwarding frr0 IPv6 to WAN peer {}: {} -> {}", wanPeerIp6, frr0ConnectPoint, externalPort);
-                        packetOut(externalPort, eth);
-                        return;
+                    // Forward traffic destined to any WAN peer to external port
+                    for (Ip6Address peerIp : wanPeerIp6List) {
+                        if (dstIp.equals(peerIp)) {
+                            log.info("Forwarding frr0 IPv6 to WAN peer {}: {} -> {}", peerIp, frr0ConnectPoint, externalPort);
+                            packetOut(externalPort, eth);
+                            return;
+                        }
                     }
                 }
 
@@ -1212,14 +1237,14 @@ public class AppComponent {
 
         log.info("WAN IPv4 forwarding intents installed for {} peers", wanPeerIp4List.size());
 
-        // Note: IPv6 WAN forwarding is handled by the packet processor (lines 397-423)
+        // Note: IPv6 WAN forwarding is handled by the packet processor
         // We do not install intents for IPv6 WAN traffic because:
         // 1. The frr0ConnectPoint (ovs1) and externalPort (ovs2) are on different switches
         // 2. The veth link between ovs1 and ovs2 is not discovered by ONOS via LLDP
         // 3. Intents fail to compile with "Unable to compile intent" error
         // 4. The packet processor already correctly handles WAN IPv6 traffic using packetOut
-        if (wanPeerIp6 != null && wanLocalIp6 != null) {
-            log.info("WAN IPv6 peering configured: {} <-> {}", wanLocalIp6, wanPeerIp6);
+        if (!wanPeerIp6List.isEmpty() && wanLocalIp6 != null) {
+            log.info("WAN IPv6 peering configured: local={}, peers={}", wanLocalIp6, wanPeerIp6List);
             log.info("WAN IPv6 traffic will be handled by packet processor (no intents)");
         }
     }
