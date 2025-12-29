@@ -485,20 +485,12 @@ public class AppComponent {
                     return;
                 }
 
-                // Handle IPv4 from peer network VXLAN ports
+                // Handle IPv4 from peer network VXLAN ports (DATA PLANE ONLY)
+                // BGP control plane now uses WAN port instead
                 if ((frr34ConnectPoint != null && srcPoint.equals(frr34ConnectPoint)) ||
                     (frr36ConnectPoint != null && srcPoint.equals(frr36ConnectPoint))) {
                     IPv4 ipv4 = (IPv4) eth.getPayload();
                     Ip4Address dstIp = Ip4Address.valueOf(ipv4.getDestinationAddress());
-
-                    // Allow traffic destined for frr0's WAN IP (BGP control plane)
-                    if (wanLocalIp4 != null && dstIp.equals(wanLocalIp4)) {
-                        if (frr0ConnectPoint != null) {
-                            log.info("Forwarding peer network IPv4 to frr0: {} -> {}", dstIp, frr0ConnectPoint);
-                            packetOut(frr0ConnectPoint, eth);
-                        }
-                        return;
-                    }
 
                     // Handle data plane traffic destined for local SDN network
                     // Do L3 routing to forward to the correct local host
@@ -508,8 +500,8 @@ public class AppComponent {
                         return;
                     }
 
-                    // Block other peer network IPv4 traffic
-                    log.debug("Blocking peer network IPv4 not for frr0 or local SDN: dstIp={}", dstIp);
+                    // Block other VXLAN traffic (BGP now uses WAN port)
+                    log.debug("Blocking VXLAN IPv4 not for local SDN: dstIp={}", dstIp);
                     return;
                 }
 
@@ -555,35 +547,9 @@ public class AppComponent {
                     return;
                 }
 
-                // Handle traffic FROM peer network VXLAN ports (inbound)
-                if ((frr34ConnectPoint != null && srcPoint.equals(frr34ConnectPoint)) ||
-                    (frr36ConnectPoint != null && srcPoint.equals(frr36ConnectPoint))) {
-                    Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
-
-                    
-                    // Handle NDP from peer network VXLAN ports directly
-                    if (ipv6.getNextHeader() == IPv6.PROTOCOL_ICMP6) {
-                        ICMP6 icmp6 = (ICMP6) ipv6.getPayload();
-                        byte type = icmp6.getIcmpType();
-                        if (type == ICMP6.NEIGHBOR_SOLICITATION || type == ICMP6.NEIGHBOR_ADVERTISEMENT) {
-                            handlePeerNetworkNDP(context, eth);
-                            return;
-                        }
-                    }
-
-                    // Block non-NDP IPv6 not destined for frr0's WAN IPv6
-                    if (wanLocalIp6 == null || !dstIp.equals(wanLocalIp6)) {
-                        log.debug("Blocking peer network IPv6 not for frr0: dstIp={}", dstIp);
-                        return;
-                    }
-
-                    // Traffic to frr0's WAN IPv6 - forward to frr0
-                    if (frr0ConnectPoint != null) {
-                        log.info("Forwarding peer network IPv6 to frr0: {} -> {}", dstIp, frr0ConnectPoint);
-                        packetOut(frr0ConnectPoint, eth);
-                    }
-                    return;
-                }
+                // Peer network VXLAN ports: BGP IPv6 now uses WAN port
+                // Data plane IPv6 to peer networks not currently implemented
+                // VXLAN ports only carry encapsulated data plane traffic
 
                 // Handle traffic TO WAN port (outbound from frr0)
                 if (wanPeerIp6 != null && frr0ConnectPoint != null && srcPoint.equals(frr0ConnectPoint)) {
@@ -675,12 +641,16 @@ public class AppComponent {
             return;
         }
 
-        // Handle ARP packets from peer network VXLAN ports (AS65340 and AS65360)
+        // Block ARP from peer VXLAN ports (only data plane traffic allowed)
+        // BGP control plane now uses WAN port instead
         if ((frr34ConnectPoint != null && srcPoint.equals(frr34ConnectPoint)) ||
             (frr36ConnectPoint != null && srcPoint.equals(frr36ConnectPoint))) {
-            handlePeerNetworkARP(context, eth);
+            log.debug("Blocking ARP from peer VXLAN port: {}", srcPoint);
             return;
         }
+
+        // Peer network BGP ARP now handled via WAN port (handleWanARP)
+        // VXLAN ports only carry data plane traffic (encapsulated, no ARP)
 
         MacAddress srcMac = eth.getSourceMAC();
         ARP arp = (ARP) eth.getPayload();
@@ -760,8 +730,9 @@ public class AppComponent {
     }
 
     /**
-     * Handle ARP packets received from the WAN port (AS65000 side).
-     * - Block ARP not destined to frr0's WAN IP
+     * Handle ARP packets received from the WAN port.
+     * Handles all peer networks: AS65000, AS65340, AS65360.
+     * - Block ARP not destined to frr0's WAN IP (192.168.70.35)
      * - Forward ARP replies to frr0
      * - Send proxy ARP replies for ARP requests targeting frr0's WAN IP
      */
@@ -779,7 +750,7 @@ public class AppComponent {
                 return;
             }
 
-            // Learn WAN peer's MAC
+            // Learn any WAN peer's MAC (AS65000, AS65340, AS65360)
             ipToMacTable.put(srcIp, srcMac);
             log.info("Learned WAN peer MAC: {} -> {}", srcIp, srcMac);
 
@@ -798,8 +769,12 @@ public class AppComponent {
         }
 
         if (arp.getOpCode() == ARP.OP_REQUEST) {
-            // AS65000 is asking for frr0's WAN IP MAC - send proxy ARP reply
-            log.info("WAN ARP Request for {}. Replying with frr0 MAC {}", dstIp, frr0Mac);
+            // Any peer (AS65000/AS65340/AS65360) asking for frr0's WAN IP - send proxy ARP reply
+            log.info("WAN ARP Request for {} from {}. Replying with frr0 MAC {}", dstIp, srcIp, frr0Mac);
+
+            // Learn the requester's MAC for BGP traffic
+            ipToMacTable.put(srcIp, srcMac);
+
             Ethernet arpReply = buildArpReply(dstIp, frr0Mac, srcIp, srcMac);
             packetOut(externalPort, arpReply);
             return;
@@ -807,8 +782,9 @@ public class AppComponent {
     }
 
     /**
-     * Handle NDP packets received from the WAN port (AS65000 side).
-     * - Block NDP not destined to frr0's WAN IPv6
+     * Handle NDP packets received from the WAN port.
+     * Handles all peer networks: AS65000, AS65340, AS65360.
+     * - Block NDP not destined to frr0's WAN IPv6 (fd70::35)
      * - Forward NDP Neighbor Advertisements to frr0
      * - Send proxy NDP replies for Neighbor Solicitations targeting frr0's WAN IPv6
      */
@@ -842,7 +818,7 @@ public class AppComponent {
                 return;
             }
 
-            // Learn WAN peer's IPv6 and MAC
+            // Learn any WAN peer's IPv6 and MAC (AS65000, AS65340, AS65360)
             ip6ToMacTable.put(srcIp, srcMac);
             log.info("Learned WAN peer IPv6 MAC: {} -> {}", srcIp, srcMac);
 
@@ -854,7 +830,7 @@ public class AppComponent {
             return;
         }
 
-        // Handle Neighbor Solicitation (request from AS65000)
+        // Handle Neighbor Solicitation (request from any peer)
         if (type == ICMP6.NEIGHBOR_SOLICITATION) {
             NeighborSolicitation ns = (NeighborSolicitation) icmp6.getPayload();
             byte[] targetBytes = ns.getTargetAddress();
@@ -866,12 +842,12 @@ public class AppComponent {
                 return;
             }
 
-            // AS65000 is asking for frr0's WAN IPv6 MAC - send proxy NDP reply
-            log.info("WAN Neighbor Solicitation for {}. Replying with frr0 MAC {}", targetIp, frr0Mac);
+            // Any peer (AS65000/AS65340/AS65360) asking for frr0's WAN IPv6 - send proxy NDP reply
+            log.info("WAN Neighbor Solicitation for {} from {}. Replying with frr0 MAC {}",
+                    targetIp, srcIp, frr0Mac);
 
-            // Learn the WAN peer's IPv6 and MAC from the NS
+            // Learn the peer's IPv6 and MAC from the NS
             ip6ToMacTable.put(srcIp, srcMac);
-            log.info("Learned WAN peer IPv6 MAC from NS: {} -> {}", srcIp, srcMac);
 
             Ethernet ndpReply = NeighborAdvertisement2.buildNdpAdv(targetIp, frr0Mac, eth);
             packetOut(externalPort, ndpReply);
@@ -888,12 +864,16 @@ public class AppComponent {
             return;
         }
 
-        // Handle NDP packets from peer network VXLAN ports (AS65340 and AS65360)
+        // Block NDP from peer VXLAN ports (only data plane traffic allowed)
+        // BGP control plane now uses WAN port instead
         if ((frr34ConnectPoint != null && srcPoint.equals(frr34ConnectPoint)) ||
             (frr36ConnectPoint != null && srcPoint.equals(frr36ConnectPoint))) {
-            handlePeerNetworkNDP(context, eth);
+            log.debug("Blocking NDP from peer VXLAN port: {}", srcPoint);
             return;
         }
+
+        // Peer network BGP NDP now handled via WAN port (handleWanNDP)
+        // VXLAN ports only carry data plane traffic (encapsulated, no NDP)
 
         MacAddress srcMac = eth.getSourceMAC();
         IPv6 ipv6 = (IPv6) eth.getPayload();
@@ -1403,57 +1383,8 @@ public class AppComponent {
     }
 
     /**
-     * Handle ARP packets received from peer network VXLAN ports (AS65340 and AS65360).
-     * - Block ARP not destined to frr0's WAN IP (192.168.70.35)
-     * - Forward ARP replies to frr0
-     * - Send proxy ARP replies for ARP requests targeting frr0's WAN IP
-     */
-    private void handlePeerNetworkARP(PacketContext context, Ethernet eth) {
-        ConnectPoint srcPoint = context.inPacket().receivedFrom();
-        ARP arp = (ARP) eth.getPayload();
-        Ip4Address srcIp = Ip4Address.valueOf(arp.getSenderProtocolAddress());
-        Ip4Address dstIp = Ip4Address.valueOf(arp.getTargetProtocolAddress());
-        MacAddress srcMac = eth.getSourceMAC();
-        MacAddress dstMac = eth.getDestinationMAC();
-
-        if (arp.getOpCode() == ARP.OP_REPLY) {
-            // Block ARP reply if destination MAC is not frr0's MAC
-            if (frr0Mac == null || !dstMac.equals(frr0Mac)) {
-                log.debug("Blocking peer network ARP Reply not for frr0 MAC: dstMac={}", dstMac);
-                return;
-            }
-
-            // Learn peer network's MAC
-            ipToMacTable.put(srcIp, srcMac);
-            log.info("Learned peer network MAC: {} -> {}", srcIp, srcMac);
-
-            // Forward ARP reply to frr0 connect point
-            if (frr0ConnectPoint != null) {
-                log.info("Forwarding peer network ARP Reply to frr0 at {}", frr0ConnectPoint);
-                packetOut(frr0ConnectPoint, eth);
-            }
-            return;
-        }
-
-        // Block ARP request not destined to frr0's WAN IP
-        if (wanLocalIp4 == null || !dstIp.equals(wanLocalIp4)) {
-            log.debug("Blocking peer network ARP Request not for frr0: dstIp={}", dstIp);
-            return;
-        }
-
-        if (arp.getOpCode() == ARP.OP_REQUEST) {
-            // Peer network is asking for frr0's WAN IP MAC - send proxy ARP reply
-            log.info("Peer network ARP Request for {} from {}. Replying with frr0 MAC {}",
-                    dstIp, srcPoint, frr0Mac);
-            Ethernet arpReply = buildArpReply(dstIp, frr0Mac, srcIp, srcMac);
-            packetOut(srcPoint, arpReply);
-            return;
-        }
-    }
-
-    /**
-     * Install bidirectional PointToPointIntents for peer network IPv4 traffic.
-     * This enables BGP communication between frr0 and peer networks (AS65340 and AS65360).
+     * Install bidirectional PointToPointIntents for peer network IPv4 BGP traffic.
+     * All peer networks (AS65340 and AS65360) now use the WAN port for BGP.
      */
     private void installPeerNetworkForwardingIntents() {
         if (peerNetworkV4Peers.isEmpty()) {
@@ -1461,33 +1392,17 @@ public class AppComponent {
             return;
         }
 
-        if (frr0ConnectPoint == null) {
-            log.warn("Cannot install peer network intents: frr0ConnectPoint is null");
+        if (frr0ConnectPoint == null || externalPort == null) {
+            log.warn("Cannot install peer network BGP intents: frr0ConnectPoint={}, externalPort={}",
+                    frr0ConnectPoint, externalPort);
             return;
-        }
-
-        // Map peer IPs to their connect points
-        Map<Ip4Address, ConnectPoint> peerToConnectPoint = new HashMap<>();
-        if (frr34ConnectPoint != null && peerNetworkV4Peers.size() > 0) {
-            // First peer network entry is AS65340 (192.168.70.34)
-            peerToConnectPoint.put(peerNetworkV4Peers.get(0)[1], frr34ConnectPoint);
-        }
-        if (frr36ConnectPoint != null && peerNetworkV4Peers.size() > 1) {
-            // Second peer network entry is AS65360 (192.168.70.36)
-            peerToConnectPoint.put(peerNetworkV4Peers.get(1)[1], frr36ConnectPoint);
         }
 
         for (Ip4Address[] peerPair : peerNetworkV4Peers) {
             Ip4Address localIp = peerPair[0];   // frr0's WAN IP (192.168.70.35)
             Ip4Address peerIp = peerPair[1];    // Peer network IP (192.168.70.34 or 192.168.70.36)
 
-            ConnectPoint peerConnectPoint = peerToConnectPoint.get(peerIp);
-            if (peerConnectPoint == null) {
-                log.warn("No connect point configured for peer IP {}", peerIp);
-                continue;
-            }
-
-            // Intent 1: frr0 -> peer network (traffic to peer IP)
+            // Intent 1: frr0 -> peer network via WAN port
             TrafficSelector toPeerSelector = DefaultTrafficSelector.builder()
                     .matchEthType(Ethernet.TYPE_IPV4)
                     .matchIPDst(IpPrefix.valueOf(peerIp, 32))
@@ -1498,15 +1413,15 @@ public class AppComponent {
                     .selector(toPeerSelector)
                     .treatment(DefaultTrafficTreatment.builder().build())
                     .filteredIngressPoint(new FilteredConnectPoint(frr0ConnectPoint))
-                    .filteredEgressPoint(new FilteredConnectPoint(peerConnectPoint))
+                    .filteredEgressPoint(new FilteredConnectPoint(externalPort))
                     .priority(50000)
                     .build();
 
             intentService.submit(toPeerIntent);
-            log.info("Installed peer network intent: frr0 ({}) -> peer {} ({})",
-                    frr0ConnectPoint, peerIp, peerConnectPoint);
+            log.info("Installed peer network BGP intent: frr0 ({}) -> peer {} via WAN ({})",
+                    frr0ConnectPoint, peerIp, externalPort);
 
-            // Intent 2: peer network -> frr0 (traffic from peer to frr0's WAN IP)
+            // Intent 2: peer network -> frr0 via WAN port
             TrafficSelector fromPeerSelector = DefaultTrafficSelector.builder()
                     .matchEthType(Ethernet.TYPE_IPV4)
                     .matchIPDst(IpPrefix.valueOf(localIp, 32))
@@ -1516,97 +1431,22 @@ public class AppComponent {
                     .appId(appId)
                     .selector(fromPeerSelector)
                     .treatment(DefaultTrafficTreatment.builder().build())
-                    .filteredIngressPoint(new FilteredConnectPoint(peerConnectPoint))
+                    .filteredIngressPoint(new FilteredConnectPoint(externalPort))
                     .filteredEgressPoint(new FilteredConnectPoint(frr0ConnectPoint))
                     .priority(50000)
                     .build();
 
             intentService.submit(fromPeerIntent);
-            log.info("Installed peer network intent: peer {} ({}) -> frr0 ({})",
-                    peerIp, peerConnectPoint, frr0ConnectPoint);
+            log.info("Installed peer network BGP intent: peer {} -> frr0 ({}) via WAN ({})",
+                    peerIp, frr0ConnectPoint, externalPort);
 
-            log.info("Peer network IPv4 BGP forwarding enabled: {} <-> {}", localIp, peerIp);
+            log.info("Peer network IPv4 BGP forwarding enabled via WAN: {} <-> {}", localIp, peerIp);
         }
     }
 
     /**
-     * Handle NDP packets received from peer network VXLAN ports (AS65340 and AS65360).
-     * - Block NDP not destined to frr0's WAN IPv6 (fd70::35)
-     * - Forward NDP Neighbor Advertisements to frr0
-     * - Send proxy NDP replies for Neighbor Solicitations targeting frr0's WAN IPv6
-     */
-    private void handlePeerNetworkNDP(PacketContext context, Ethernet eth) {
-        ConnectPoint srcPoint = context.inPacket().receivedFrom();
-        IPv6 ipv6 = (IPv6) eth.getPayload();
-
-        // Verify this is an ICMP6 packet
-        if (ipv6.getNextHeader() != IPv6.PROTOCOL_ICMP6) {
-            log.debug("Dropping non-ICMP6 IPv6 from peer network port");
-            return;
-        }
-
-        ICMP6 icmp6 = (ICMP6) ipv6.getPayload();
-        byte type = icmp6.getIcmpType();
-
-        // Only handle NDP packets (NS and NA)
-        if (type != ICMP6.NEIGHBOR_SOLICITATION && type != ICMP6.NEIGHBOR_ADVERTISEMENT) {
-            log.debug("Dropping non-NDP ICMP6 from peer network port: type={}", type);
-            return;
-        }
-
-        MacAddress srcMac = eth.getSourceMAC();
-        MacAddress dstMac = eth.getDestinationMAC();
-        Ip6Address srcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
-
-        // Handle Neighbor Advertisement (response to our NS)
-        if (type == ICMP6.NEIGHBOR_ADVERTISEMENT) {
-            // Block NA if destination MAC is not frr0's MAC
-            if (frr0Mac == null || !dstMac.equals(frr0Mac)) {
-                log.debug("Blocking peer network Neighbor Advertisement not for frr0 MAC: dstMac={}", dstMac);
-                return;
-            }
-
-            // Learn peer network's IPv6 and MAC
-            ip6ToMacTable.put(srcIp, srcMac);
-            log.info("Learned peer network IPv6 MAC: {} -> {}", srcIp, srcMac);
-
-            // Forward NA to frr0 connect point
-            if (frr0ConnectPoint != null) {
-                log.info("Forwarding peer network Neighbor Advertisement to frr0 at {}", frr0ConnectPoint);
-                packetOut(frr0ConnectPoint, eth);
-            }
-            return;
-        }
-
-        // Handle Neighbor Solicitation (request from peer network)
-        if (type == ICMP6.NEIGHBOR_SOLICITATION) {
-            NeighborSolicitation ns = (NeighborSolicitation) icmp6.getPayload();
-            byte[] targetBytes = ns.getTargetAddress();
-            Ip6Address targetIp = Ip6Address.valueOf(targetBytes);
-
-            // Block NS not destined to frr0's WAN IPv6
-            if (wanLocalIp6 == null || !targetIp.equals(wanLocalIp6)) {
-                log.debug("Blocking peer network Neighbor Solicitation not for frr0: targetIp={}", targetIp);
-                return;
-            }
-
-            // Peer network is asking for frr0's WAN IPv6 MAC - send proxy NDP reply
-            log.info("Peer network Neighbor Solicitation for {} from {}. Replying with frr0 MAC {}",
-                    targetIp, srcPoint, frr0Mac);
-
-            // Learn the peer network's IPv6 and MAC from the NS
-            ip6ToMacTable.put(srcIp, srcMac);
-            log.info("Learned peer network IPv6 MAC from NS: {} -> {}", srcIp, srcMac);
-
-            Ethernet ndpReply = NeighborAdvertisement2.buildNdpAdv(targetIp, frr0Mac, eth);
-            packetOut(srcPoint, ndpReply);
-            return;
-        }
-    }
-
-    /**
-     * Install bidirectional PointToPointIntents for peer network IPv6 traffic.
-     * This enables BGP communication between frr0 and peer networks (AS65340 and AS65360) over IPv6.
+     * Install bidirectional PointToPointIntents for peer network IPv6 BGP traffic.
+     * All peer networks (AS65340 and AS65360) now use the WAN port for BGP.
      */
     private void installPeerNetworkV6ForwardingIntents() {
         if (peerNetworkV6Peers.isEmpty()) {
@@ -1614,33 +1454,17 @@ public class AppComponent {
             return;
         }
 
-        if (frr0ConnectPoint == null) {
-            log.warn("Cannot install peer network IPv6 intents: frr0ConnectPoint is null");
+        if (frr0ConnectPoint == null || externalPort == null) {
+            log.warn("Cannot install peer network IPv6 BGP intents: frr0ConnectPoint={}, externalPort={}",
+                    frr0ConnectPoint, externalPort);
             return;
-        }
-
-        // Map peer IPs to their connect points
-        Map<Ip6Address, ConnectPoint> peerToConnectPoint = new HashMap<>();
-        if (frr34ConnectPoint != null && peerNetworkV6Peers.size() > 0) {
-            // First peer network entry is AS65340 (fd70::34)
-            peerToConnectPoint.put(peerNetworkV6Peers.get(0)[1], frr34ConnectPoint);
-        }
-        if (frr36ConnectPoint != null && peerNetworkV6Peers.size() > 1) {
-            // Second peer network entry is AS65360 (fd70::36)
-            peerToConnectPoint.put(peerNetworkV6Peers.get(1)[1], frr36ConnectPoint);
         }
 
         for (Ip6Address[] peerPair : peerNetworkV6Peers) {
             Ip6Address localIp = peerPair[0];   // frr0's WAN IPv6 (fd70::35)
             Ip6Address peerIp = peerPair[1];    // Peer network IPv6 (fd70::34 or fd70::36)
 
-            ConnectPoint peerConnectPoint = peerToConnectPoint.get(peerIp);
-            if (peerConnectPoint == null) {
-                log.warn("No connect point configured for peer IPv6 {}", peerIp);
-                continue;
-            }
-
-            // Intent 1: frr0 -> peer network (traffic to peer IP)
+            // Intent 1: frr0 -> peer network via WAN port
             TrafficSelector toPeerSelector = DefaultTrafficSelector.builder()
                     .matchEthType(Ethernet.TYPE_IPV6)
                     .matchIPv6Dst(IpPrefix.valueOf(peerIp, 128))
@@ -1651,15 +1475,15 @@ public class AppComponent {
                     .selector(toPeerSelector)
                     .treatment(DefaultTrafficTreatment.builder().build())
                     .filteredIngressPoint(new FilteredConnectPoint(frr0ConnectPoint))
-                    .filteredEgressPoint(new FilteredConnectPoint(peerConnectPoint))
+                    .filteredEgressPoint(new FilteredConnectPoint(externalPort))
                     .priority(50000)
                     .build();
 
             intentService.submit(toPeerIntent);
-            log.info("Installed peer network IPv6 intent: frr0 ({}) -> peer {} ({})",
-                    frr0ConnectPoint, peerIp, peerConnectPoint);
+            log.info("Installed peer network IPv6 BGP intent: frr0 ({}) -> peer {} via WAN ({})",
+                    frr0ConnectPoint, peerIp, externalPort);
 
-            // Intent 2: peer network -> frr0 (traffic from peer to frr0's WAN IPv6)
+            // Intent 2: peer network -> frr0 via WAN port
             TrafficSelector fromPeerSelector = DefaultTrafficSelector.builder()
                     .matchEthType(Ethernet.TYPE_IPV6)
                     .matchIPv6Dst(IpPrefix.valueOf(localIp, 128))
@@ -1669,16 +1493,16 @@ public class AppComponent {
                     .appId(appId)
                     .selector(fromPeerSelector)
                     .treatment(DefaultTrafficTreatment.builder().build())
-                    .filteredIngressPoint(new FilteredConnectPoint(peerConnectPoint))
+                    .filteredIngressPoint(new FilteredConnectPoint(externalPort))
                     .filteredEgressPoint(new FilteredConnectPoint(frr0ConnectPoint))
                     .priority(50000)
                     .build();
 
             intentService.submit(fromPeerIntent);
-            log.info("Installed peer network IPv6 intent: peer {} ({}) -> frr0 ({})",
-                    peerIp, peerConnectPoint, frr0ConnectPoint);
+            log.info("Installed peer network IPv6 BGP intent: peer {} -> frr0 ({}) via WAN ({})",
+                    peerIp, frr0ConnectPoint, externalPort);
 
-            log.info("Peer network IPv6 BGP forwarding enabled: {} <-> {}", localIp, peerIp);
+            log.info("Peer network IPv6 BGP forwarding enabled via WAN: {} <-> {}", localIp, peerIp);
         }
     }
 
