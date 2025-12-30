@@ -76,6 +76,13 @@ swap_in_file "$vrouter_conf" "192\.168\.70\." ""
 swap_in_file "$vrouter_conf" "2a0b:4e07:c4:" ""
 swap_in_file "$vrouter_conf" "fd70::" ""
 
+# MAC addresses: 00:00:00:00:XX:01, 00:00:00:00:XX:02
+swap_in_file "$vrouter_conf" "00:00:00:00:" ":01"
+swap_in_file "$vrouter_conf" "00:00:00:00:" ":02"
+
+# Solicited-node multicast: ff02::1:ff00:XX
+swap_in_file "$vrouter_conf" "ff02::1:ff00:" ""
+
 # --- 4. Update OLD_ID for future runs ---
 sed -i "s/^OLD_ID=.*/OLD_ID=${NEW_ID}/" "${SCRIPT_DIR}/prepare_network_id.sh"
 
