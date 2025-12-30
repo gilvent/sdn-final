@@ -1416,21 +1416,25 @@ public class AppComponent {
             return;
         }
 
-        log.info("L3 Routing: Sending packet to {} via port {}", dstMac, outPoint.port());
+        log.info("L3 Routing: Sending packet to {} via port {}/{}", dstMac,outPoint.deviceId(), outPoint.port());
 
         // Send the packet out
         packetOut(outPoint, routedPkt);
 
         // Install flow rules for future packets (optional but recommended for
         // performance)
-        installL3FlowRule(context, eth, dstMac, outPoint.port());
+        installL3FlowRule(context, eth, dstMac, outPoint.port(), outPoint);
     }
 
     /**
      * Install a flow rule for L3 routed traffic.
      */
-    private void installL3FlowRule(PacketContext context, Ethernet eth, MacAddress dstMac, PortNumber outPort) {
+    private void installL3FlowRule(PacketContext context, Ethernet eth, MacAddress dstMac, PortNumber outPort, ConnectPoint outPoint) {
         DeviceId deviceId = context.inPacket().receivedFrom().deviceId();
+
+        if (!deviceId.equals(outPoint.deviceId())) {
+            return;
+        }
 
         TrafficSelector.Builder selectorBuilder = DefaultTrafficSelector.builder()
                 .matchEthDst(virtualGatewayMac);
