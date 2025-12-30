@@ -23,6 +23,7 @@ import org.onlab.packet.MacAddress;
 import org.onlab.packet.VlanId;
 import org.onlab.packet.IPv6;
 import org.onlab.packet.ICMP6;
+import org.onlab.packet.ndp.NeighborDiscoveryOptions;
 import org.onlab.packet.ndp.NeighborSolicitation;
 import org.onlab.packet.Ip6Address;
 import org.onlab.packet.IpAddress;
@@ -135,16 +136,15 @@ public class AppComponent {
     protected IntentService intentService;
 
     private final InternalConfigListener configListener = new InternalConfigListener();
-    private final ConfigFactory<ApplicationId, VRouterConfig> configFactory =
-            new ConfigFactory<ApplicationId, VRouterConfig>(
-                    SubjectFactories.APP_SUBJECT_FACTORY,
-                    VRouterConfig.class,
-                    "vrouter") {
-                @Override
-                public VRouterConfig createConfig() {
-                    return new VRouterConfig();
-                }
-            };
+    private final ConfigFactory<ApplicationId, VRouterConfig> configFactory = new ConfigFactory<ApplicationId, VRouterConfig>(
+            SubjectFactories.APP_SUBJECT_FACTORY,
+            VRouterConfig.class,
+            "vrouter") {
+        @Override
+        public VRouterConfig createConfig() {
+            return new VRouterConfig();
+        }
+    };
 
     // Virtual gateway configuration
     private Ip4Address virtualGatewayIp4;
@@ -160,14 +160,14 @@ public class AppComponent {
     private ConnectPoint externalPort;
 
     // WAN peering configuration (for AS65000, AS65340, AS65360 BGP)
-    private Ip4Address wanLocalIp4;       // frr0's IP on WAN subnet (192.168.70.35)
-    private List<Ip4Address> wanPeerIp4List = new ArrayList<>();  // BGP peer IPs (AS65000, AS65340, AS65360)
+    private Ip4Address wanLocalIp4; // frr0's IP on WAN subnet (192.168.70.35)
+    private List<Ip4Address> wanPeerIp4List = new ArrayList<>(); // BGP peer IPs (AS65000, AS65340, AS65360)
     private ConnectPoint frr0ConnectPoint; // Connect point where frr0 is connected
     private ConnectPoint frr1ConnectPoint; // Connect point where frr1 is connected
 
     // WAN IPv6 peering configuration (for AS65000, AS65340, AS65360 BGP over IPv6)
-    private Ip6Address wanLocalIp6;       // frr0's IPv6 on WAN subnet (fd70::35)
-    private List<Ip6Address> wanPeerIp6List = new ArrayList<>();  // BGP peer IPv6s
+    private Ip6Address wanLocalIp6; // frr0's IPv6 on WAN subnet (fd70::35)
+    private List<Ip6Address> wanPeerIp6List = new ArrayList<>(); // BGP peer IPv6s
 
     // Internal IPv6 peer configuration (for inter-AS BGP, e.g., frr0 <-> frr1)
     // Stores pairs of [localIp, peerIp] for internal BGP peering
@@ -323,8 +323,10 @@ public class AppComponent {
             }
 
             // Parse v6-peer to get WAN IPv6 and internal peer addresses
-            // Format: ["fd70::35, fd70::fe", "fd70::35, fd70::34", "fd70::35, fd70::36", "fd63::1, fd63::2"]
-            // Entries with same /64 prefix as first entry's local IP are WAN peers, others are internal
+            // Format: ["fd70::35, fd70::fe", "fd70::35, fd70::34", "fd70::35, fd70::36",
+            // "fd63::1, fd63::2"]
+            // Entries with same /64 prefix as first entry's local IP are WAN peers, others
+            // are internal
             List<String[]> v6Peers = config.v6Peers();
             if (v6Peers != null && !v6Peers.isEmpty()) {
                 // First entry sets local IP for WAN subnet
@@ -346,7 +348,7 @@ public class AppComponent {
                         log.info("Loaded WAN IPv6 peer: local={}, peer={}", localIp, peerIp);
                     } else {
                         // This is an internal peer
-                        internalV6Peers.add(new Ip6Address[]{localIp, peerIp});
+                        internalV6Peers.add(new Ip6Address[] { localIp, peerIp });
                         log.info("Loaded internal IPv6 peering config: local={}, peer={}", localIp, peerIp);
                     }
                 }
@@ -435,7 +437,7 @@ public class AppComponent {
      */
     private boolean isPeerVxlanPort(ConnectPoint cp) {
         return (peer1VxlanCp != null && cp.equals(peer1VxlanCp)) ||
-               (peer2VxlanCp != null && cp.equals(peer2VxlanCp));
+                (peer2VxlanCp != null && cp.equals(peer2VxlanCp));
     }
 
     /**
@@ -472,10 +474,12 @@ public class AppComponent {
 
     /**
      * Get the gateway MAC address for a peer VXLAN connect point.
-     * Returns the peer-specific gateway MAC if configured, otherwise falls back to virtualGatewayMac.
+     * Returns the peer-specific gateway MAC if configured, otherwise falls back to
+     * virtualGatewayMac.
      *
      * @param peerCp The peer VXLAN connect point
-     * @return Gateway MAC address for the peer, or virtualGatewayMac if not configured
+     * @return Gateway MAC address for the peer, or virtualGatewayMac if not
+     *         configured
      */
     private MacAddress getPeerGatewayMac(ConnectPoint peerCp) {
         if (peer1VxlanCp != null && peerCp.equals(peer1VxlanCp)) {
@@ -497,7 +501,7 @@ public class AppComponent {
 
             if (virtualGatewayIp4 == null || virtualGatewayMac == null) {
                 log.warn("VRouter config not yet loaded. Dropping packet.",
-                         virtualGatewayIp4, virtualGatewayMac);
+                        virtualGatewayIp4, virtualGatewayMac);
                 return;
             }
 
@@ -551,7 +555,8 @@ public class AppComponent {
                     // Forward traffic destined to any WAN peer to external port
                     for (Ip4Address peerIp : wanPeerIp4List) {
                         if (dstIp.equals(peerIp)) {
-                            log.info("Forwarding frr0 IPv4 to WAN peer {}: {} -> {}", peerIp, frr0ConnectPoint, externalPort);
+                            log.info("Forwarding frr0 IPv4 to WAN peer {}: {} -> {}", peerIp, frr0ConnectPoint,
+                                    externalPort);
                             packetOut(externalPort, eth);
                             return;
                         }
@@ -613,7 +618,8 @@ public class AppComponent {
                     // Forward traffic destined to any WAN peer to external port
                     for (Ip6Address peerIp : wanPeerIp6List) {
                         if (dstIp.equals(peerIp)) {
-                            log.info("Forwarding frr0 IPv6 to WAN peer {}: {} -> {}", peerIp, frr0ConnectPoint, externalPort);
+                            log.info("Forwarding frr0 IPv6 to WAN peer {}: {} -> {}", peerIp, frr0ConnectPoint,
+                                    externalPort);
                             packetOut(externalPort, eth);
                             return;
                         }
@@ -675,6 +681,127 @@ public class AppComponent {
         return ethPkt;
     }
 
+    /**
+     * Build an ARP REQUEST packet from the virtual gateway to discover a host's MAC.
+     */
+    private Ethernet buildArpRequest(Ip4Address targetIp) {
+        ARP arpRequest = new ARP();
+        arpRequest.setHardwareType(ARP.HW_TYPE_ETHERNET)
+                .setProtocolType(ARP.PROTO_TYPE_IP)
+                .setHardwareAddressLength((byte) MacAddress.MAC_ADDRESS_LENGTH)
+                .setProtocolAddressLength((byte) Ip4Address.BYTE_LENGTH)
+                .setOpCode(ARP.OP_REQUEST)
+                .setSenderHardwareAddress(virtualGatewayMac.toBytes())
+                .setSenderProtocolAddress(virtualGatewayIp4.toOctets())
+                .setTargetHardwareAddress(MacAddress.ZERO.toBytes())
+                .setTargetProtocolAddress(targetIp.toOctets());
+
+        Ethernet ethPkt = new Ethernet();
+        ethPkt.setEtherType(Ethernet.TYPE_ARP)
+                .setSourceMACAddress(virtualGatewayMac)
+                .setDestinationMACAddress(MacAddress.BROADCAST)
+                .setVlanID(VlanId.NONE.toShort())
+                .setPayload(arpRequest);
+
+        return ethPkt;
+    }
+
+    /**
+     * Send an ARP request to discover a local host's MAC address.
+     * Floods ARP request to all edge ports except peer VXLAN and external ports.
+     */
+    private void sendArpRequest(Ip4Address targetIp) {
+        log.info("[Gateway] Sending ARP request for {} from virtual gateway", targetIp);
+
+        Ethernet arpRequest = buildArpRequest(targetIp);
+
+        Iterable<ConnectPoint> edgePoints = edgePortService.getEdgePoints();
+        for (ConnectPoint cp : edgePoints) {
+            // Skip peer VXLAN ports - no ARP needed across VXLAN
+            if (isPeerVxlanPort(cp)) {
+                continue;
+            }
+            // Skip external WAN port
+            if (externalPort != null && cp.equals(externalPort)) {
+                continue;
+            }
+            packetOut(cp, arpRequest);
+        }
+    }
+
+    /**
+     * Build an NDP Neighbor Solicitation packet from the virtual gateway to discover a host's MAC.
+     */
+    private Ethernet buildNdpSolicitation(Ip6Address targetIp) {
+        // Compute solicited-node multicast address: ff02::1:ffXX:XXXX
+        byte[] targetBytes = targetIp.toOctets();
+        byte[] solicitedNodeAddr = new byte[] {
+            (byte) 0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x01, (byte) 0xff,
+            targetBytes[13], targetBytes[14], targetBytes[15]
+        };
+
+        // Compute solicited-node multicast MAC: 33:33:ff:XX:XX:XX
+        byte[] solicitedNodeMac = new byte[] {
+            0x33, 0x33, (byte) 0xff,
+            targetBytes[13], targetBytes[14], targetBytes[15]
+        };
+
+        // Build Neighbor Solicitation
+        NeighborSolicitation ns = new NeighborSolicitation();
+        ns.setTargetAddress(targetBytes);
+        // Add source link-layer address option (type 1)
+        ns.addOption(NeighborDiscoveryOptions.TYPE_SOURCE_LL_ADDRESS, virtualGatewayMac.toBytes());
+
+        ICMP6 icmp6 = new ICMP6();
+        icmp6.setIcmpType(ICMP6.NEIGHBOR_SOLICITATION);
+        icmp6.setIcmpCode((byte) 0);
+        icmp6.setPayload(ns);
+
+        IPv6 ipv6 = new IPv6();
+        ipv6.setSourceAddress(virtualGatewayIp6.toOctets());
+        ipv6.setDestinationAddress(solicitedNodeAddr);
+        ipv6.setNextHeader(IPv6.PROTOCOL_ICMP6);
+        ipv6.setHopLimit((byte) 255);
+        ipv6.setPayload(icmp6);
+
+        Ethernet eth = new Ethernet();
+        eth.setEtherType(Ethernet.TYPE_IPV6);
+        eth.setSourceMACAddress(virtualGatewayMac);
+        eth.setDestinationMACAddress(MacAddress.valueOf(solicitedNodeMac));
+        eth.setPayload(ipv6);
+
+        return eth;
+    }
+
+    /**
+     * Send an NDP Neighbor Solicitation to discover a local host's MAC address.
+     * Floods NDP solicitation to all edge ports except peer VXLAN and external ports.
+     */
+    private void sendNdpSolicitation(Ip6Address targetIp) {
+        if (virtualGatewayIp6 == null) {
+            log.warn("[Gateway] Cannot send NDP solicitation: virtualGatewayIp6 not configured");
+            return;
+        }
+
+        log.info("[Gateway] Sending NDP solicitation for {} from virtual gateway", targetIp);
+
+        Ethernet ndpSolicitation = buildNdpSolicitation(targetIp);
+
+        Iterable<ConnectPoint> edgePoints = edgePortService.getEdgePoints();
+        for (ConnectPoint cp : edgePoints) {
+            // Skip peer VXLAN ports - no NDP needed across VXLAN
+            if (isPeerVxlanPort(cp)) {
+                continue;
+            }
+            // Skip external WAN port
+            if (externalPort != null && cp.equals(externalPort)) {
+                continue;
+            }
+            packetOut(cp, ndpSolicitation);
+        }
+    }
+
     public ConnectPoint findHostEdgePoint(MacAddress dstMac) {
         HostId hostId = HostId.hostId(dstMac, VlanId.NONE);
         Host host = hostService.getHost(hostId);
@@ -686,8 +813,6 @@ public class AppComponent {
         HostLocation loc = host.location();
         return new ConnectPoint(loc.deviceId(), loc.port());
     }
-
-    
 
     private void handleARP(PacketContext context, Ethernet eth) {
         ConnectPoint srcPoint = context.inPacket().receivedFrom();
@@ -734,7 +859,7 @@ public class AppComponent {
         if (arp.getOpCode() == ARP.OP_REQUEST) {
             // Check if ARP is for our virtual gateway IP
             log.info("ARP REQUEST for {}. from {}",
-                        dstIp, srcIp);
+                    dstIp, srcIp);
             if (virtualGatewayIp4 != null && dstIp.equals(virtualGatewayIp4)) {
                 log.info("ARP REQUEST for virtual gateway IP {}. Replying with MAC {}",
                         virtualGatewayIp4, virtualGatewayMac);
@@ -1002,7 +1127,8 @@ public class AppComponent {
             if (cachedDstMac != null) {
                 // log.info("NDP TABLE HIT. Requested MAC = {}", cachedDstMac);
 
-                Ethernet ndpAdv = NeighborAdvertisement2.buildNdpAdv(targetIp, cachedDstMac, context.inPacket().parsed());
+                Ethernet ndpAdv = NeighborAdvertisement2.buildNdpAdv(targetIp, cachedDstMac,
+                        context.inPacket().parsed());
                 ConnectPoint outCp = context.inPacket().receivedFrom();
 
                 packetOut(outCp, ndpAdv);
@@ -1027,7 +1153,7 @@ public class AppComponent {
     /**
      * Handle incoming IPv4 packets from peer VXLAN ports.
      * Only allows traffic destined to local SDN network.
-     * Delegates to L3 routing logic since packets arrive with virtual gateway MAC.
+     * Routes to local host if MAC is known, otherwise sends ARP to discover.
      */
     private void handleIncomingPeerVxlanIPv4(PacketContext context, Ethernet eth) {
         IPv4 ipv4 = (IPv4) eth.getPayload();
@@ -1037,31 +1163,29 @@ public class AppComponent {
         // Security: Only allow traffic destined to local SDN network
         if (localSdnPrefix == null ||
                 !localSdnPrefix.contains(IpAddress.valueOf(dstIp.toString()))) {
-            log.warn("Blocked IPv4 from peer VXLAN: dst {}, src {}", dstIp, srcIp);
+            log.warn("[Incoming Peer VXLAN] Blocked IPv4: src {} -> dst {}", srcIp, dstIp);
             return;
         }
 
-        log.info("Incoming peer VXLAN IPv4: src {} -> dst {}: dst MAC: {}", srcIp, dstIp, eth.getDestinationMAC());
+        log.info("[Incoming Peer VXLAN] Allowed IPv4: src {} -> dst {}", srcIp, dstIp);
 
-        // TODO: Remove later, keep for reference
         // Route to local host - lookup MAC and forward
-        // MacAddress dstMac = ipToMacTable.asJavaMap().get(dstIp);
-        // if (dstMac != null) {
-        //     routePacket(context, eth, dstMac);
-        // } else {
-        //     // Flood to find the host
-        //     log.warn("MAC not found for {} from peer VXLAN, flooding", dstIp);
-        //     flood(context);
-        // }
-
-        // Delegate to L3 routing - packet already has virtual gateway MAC as destination
-        handleL3RoutingIPv4(context, eth);
+        MacAddress dstMac = ipToMacTable.asJavaMap().get(dstIp);
+        if (dstMac != null) {
+            log.info("[Incoming Peer VXLAN] Routing to local host: {} -> {}", dstIp, dstMac);
+            routePacket(context, eth, dstMac);
+        } else {
+            // Send ARP request to discover host MAC, drop this packet (sender will retransmit)
+            log.info("[Incoming Peer VXLAN] MAC not found for {}, sending ARP request", dstIp);
+            sendArpRequest(dstIp);
+            // Packet is dropped - ICMP sender will retransmit after ARP completes
+        }
     }
 
     /**
      * Handle incoming IPv6 packets from peer VXLAN ports.
      * Only allows traffic destined to local SDN network.
-     * Delegates to L3 routing logic since packets arrive with virtual gateway MAC.
+     * Routes to local host if MAC is known, otherwise sends NDP to discover.
      */
     private void handleIncomingPeerVxlanIPv6(PacketContext context, Ethernet eth) {
         IPv6 ipv6 = (IPv6) eth.getPayload();
@@ -1071,24 +1195,22 @@ public class AppComponent {
         // Security: Only allow traffic destined to local SDN network
         if (localSdnPrefix6 == null ||
                 !localSdnPrefix6.contains(IpAddress.valueOf(dstIp.toString()))) {
-            // log.warn("Blocked IPv6 from peer VXLAN: dst {} not in local prefix {}", dstIp, localSdnPrefix6);
             return;
         }
 
-        // TODO: Remove later, keep for reference
-        // // Route to local host - lookup MAC and forward
-        // MacAddress dstMac = ip6ToMacTable.asJavaMap().get(dstIp);
-        // if (dstMac != null) {
-        //     routePacket(context, eth, dstMac);
-        // } else {
-        //     // Flood to find the host
-        //     log.warn("MAC not found for {} from peer VXLAN, flooding", dstIp);
-        //     flood(context);
-        // }
-        log.info("Incoming peer VXLAN IPv6: src {} -> dst {}: dst MAC: {}", srcIp, dstIp, eth.getDestinationMAC());
+        log.info("[Incoming Peer VXLAN] Allowed IPv6: src {} -> dst {}", srcIp, dstIp);
 
-        // Delegate to L3 routing - packet already has virtual gateway MAC as destination
-        handleL3RoutingIPv6(context, eth);
+        // Route to local host - lookup MAC and forward
+        MacAddress dstMac = ip6ToMacTable.asJavaMap().get(dstIp);
+        if (dstMac != null) {
+            log.info("[Incoming Peer VXLAN] Routing to local host: {} -> {}", dstIp, dstMac);
+            routePacket(context, eth, dstMac);
+        } else {
+            // Send NDP solicitation to discover host MAC, drop this packet (sender will retransmit)
+            log.info("[Incoming Peer VXLAN] MAC not found for {}, sending NDP solicitation", dstIp);
+            sendNdpSolicitation(dstIp);
+            // Packet is dropped - ICMPv6 sender will retransmit after NDP completes
+        }
     }
 
     /**
@@ -1096,7 +1218,7 @@ public class AppComponent {
      * Rewrites MAC addresses and sends to the peer VXLAN connect point.
      */
     private void routeToPeerVxlan(PacketContext context, Ethernet eth,
-                                   Ip4Address dstIp, ConnectPoint peerCp) {
+            Ip4Address dstIp, ConnectPoint peerCp) {
         Ip4Address srcIp = Ip4Address.valueOf(((IPv4) eth.getPayload()).getSourceAddress());
 
         // Rewrite MACs: src=virtualGateway, dst=peer's gateway MAC (from config)
@@ -1117,7 +1239,7 @@ public class AppComponent {
      * Rewrites MAC addresses and sends to the peer VXLAN connect point.
      */
     private void routeToPeerVxlanV6(PacketContext context, Ethernet eth,
-                                     Ip6Address dstIp, ConnectPoint peerCp) {
+            Ip6Address dstIp, ConnectPoint peerCp) {
         Ip6Address srcIp = Ip6Address.valueOf(((IPv6) eth.getPayload()).getSourceAddress());
 
         // Rewrite MACs: src=virtualGateway, dst=peer's gateway MAC (from config)
@@ -1185,11 +1307,13 @@ public class AppComponent {
             routePacket(context, eth, dstMac);
         } else if (frr0Mac != null) {
             // Default route: forward to the pre-configured Quagga/FRR router
-            log.info("[Gateway] L3 IPv4 REMOTE: IP {} not in table. Forwarding to default frr0 router (MAC={})", dstIp, frr0Mac);
+            log.info("[Gateway] L3 IPv4 REMOTE: IP {} not in table. Forwarding to default frr0 router (MAC={})", dstIp,
+                    frr0Mac);
             routePacket(context, eth, frr0Mac);
         } else {
             // No route and no default, flood as a last resort
-            log.warn("[Gateway] L3 IPv4: Cannot route to {}. No route, no MAC, and no default router configured.", dstIp);
+            log.warn("[Gateway] L3 IPv4: Cannot route to {}. No route, no MAC, and no default router configured.",
+                    dstIp);
             flood(context);
         }
     }
@@ -1248,11 +1372,13 @@ public class AppComponent {
             routePacket(context, eth, dstMac);
         } else if (frr0Mac != null) {
             // Default route: forward to the pre-configured Quagga/FRR router
-            log.info("[Gateway] L3 IPv6 REMOTE: IP {} not in table. Forwarding to default frr0 router (MAC={})", dstIp, frr0Mac);
+            log.info("[Gateway] L3 IPv6 REMOTE: IP {} not in table. Forwarding to default frr0 router (MAC={})", dstIp,
+                    frr0Mac);
             routePacket(context, eth, frr0Mac);
         } else {
             // No route and no default, flood as a last resort
-            log.warn("[Gateway] L3 IPv6: Cannot route to {}. No route, no MAC, and no default router configured.", dstIp);
+            log.warn("[Gateway] L3 IPv6: Cannot route to {}. No route, no MAC, and no default router configured.",
+                    dstIp);
             flood(context);
         }
     }
@@ -1295,7 +1421,8 @@ public class AppComponent {
         // Send the packet out
         packetOut(outPoint, routedPkt);
 
-        // Install flow rules for future packets (optional but recommended for performance)
+        // Install flow rules for future packets (optional but recommended for
+        // performance)
         installL3FlowRule(context, eth, dstMac, outPoint.port());
     }
 
@@ -1330,7 +1457,7 @@ public class AppComponent {
                 .forDevice(deviceId)
                 .withSelector(selectorBuilder.build())
                 .withTreatment(treatment)
-                .withPriority(40)  // Higher priority than L2 rules
+                .withPriority(40) // Higher priority than L2 rules
                 .fromApp(appId)
                 .makeTemporary(30)
                 .build();
@@ -1479,10 +1606,12 @@ public class AppComponent {
 
         // Note: IPv6 WAN forwarding is handled by the packet processor
         // We do not install intents for IPv6 WAN traffic because:
-        // 1. The frr0ConnectPoint (ovs1) and externalPort (ovs2) are on different switches
+        // 1. The frr0ConnectPoint (ovs1) and externalPort (ovs2) are on different
+        // switches
         // 2. The veth link between ovs1 and ovs2 is not discovered by ONOS via LLDP
         // 3. Intents fail to compile with "Unable to compile intent" error
-        // 4. The packet processor already correctly handles WAN IPv6 traffic using packetOut
+        // 4. The packet processor already correctly handles WAN IPv6 traffic using
+        // packetOut
         if (!wanPeerIp6List.isEmpty() && wanLocalIp6 != null) {
             log.info("WAN IPv6 peering configured: local={}, peers={}", wanLocalIp6, wanPeerIp6List);
             log.info("WAN IPv6 traffic will be handled by packet processor (no intents)");
@@ -1491,7 +1620,8 @@ public class AppComponent {
 
     /**
      * Install bidirectional PointToPointIntents for internal IPv6 peer traffic.
-     * This enables BGP communication between frr0 and frr1 on the fd63::/64 network.
+     * This enables BGP communication between frr0 and frr1 on the fd63::/64
+     * network.
      */
     private void installInternalPeerForwardingIntents() {
         // TODO: Implement similar intents for IPv4 internal peers if needed
@@ -1507,8 +1637,8 @@ public class AppComponent {
         }
 
         for (Ip6Address[] peerPair : internalV6Peers) {
-            Ip6Address frr0InternalIp = peerPair[0];  // fd63::1
-            Ip6Address frr1InternalIp = peerPair[1];  // fd63::2
+            Ip6Address frr0InternalIp = peerPair[0]; // fd63::1
+            Ip6Address frr1InternalIp = peerPair[1]; // fd63::2
 
             // Intent 1: Traffic to frr0's internal IP (fd63::1)
             TrafficSelector toFrr0Selector = DefaultTrafficSelector.builder()
