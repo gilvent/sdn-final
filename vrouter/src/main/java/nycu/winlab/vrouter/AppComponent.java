@@ -514,6 +514,34 @@ public class AppComponent {
         return virtualGatewayMac;
     }
 
+    /**
+     * Extract MAC address from IPv6 link-local address using EUI-64 format.
+     *
+     * EUI-64 embeds MAC in the interface identifier (last 64 bits) with:
+     * - ff:fe inserted in the middle of the MAC
+     * - 7th bit (U/L bit) of the first byte inverted
+     *
+     * Example: fe80::b8a7:aeff:fee3:48af → BA:A7:AE:E3:48:AF
+     *          b8 XOR 02 = ba (invert U/L bit)
+     *
+     * @param linkLocal IPv6 link-local address
+     * @return MAC address extracted from the link-local address
+     */
+    private MacAddress macFromLinkLocal(Ip6Address linkLocal) {
+        byte[] addr = linkLocal.toOctets(); // 16 bytes
+        // Interface ID is bytes 8-15 (last 64 bits)
+        // EUI-64 format: [8][9][10]:ff:fe:[13][14][15] with bit 7 inverted in byte[8]
+        byte[] mac = new byte[6];
+        mac[0] = (byte) (addr[8] ^ 0x02);  // Invert U/L bit (7th bit)
+        mac[1] = addr[9];
+        mac[2] = addr[10];
+        // Skip addr[11]=0xff, addr[12]=0xfe (EUI-64 insertion)
+        mac[3] = addr[13];
+        mac[4] = addr[14];
+        mac[5] = addr[15];
+        return MacAddress.valueOf(mac);
+    }
+
     private class VRouterPacketProcessor implements PacketProcessor {
         @Override
         public void process(PacketContext context) {
@@ -664,6 +692,18 @@ public class AppComponent {
                         handleNDP(context, eth);
                         return;
                     }
+                }
+
+                // Check for intercepted IPv6 packets: dstMAC = frr0 MAC, dstIP in local subnet (but not frr0's IP)
+                // These are packets routed by frr0 to local hosts that need virtual gateway handling
+                Ip6Address dstIpV6 = Ip6Address.valueOf(ipv6.getDestinationAddress());
+                if (frr0Mac != null && eth.getDestinationMAC().equals(frr0Mac) &&
+                        localSdnPrefix6 != null && localSdnPrefix6.contains(dstIpV6) &&
+                        frr0Ip6 != null && !dstIpV6.equals(frr0Ip6)) {
+                    log.info("[Gateway] Intercept Inter-AS IPv6 packet to local host (for frr0): dstMAC={}, dstIP={}",
+                            eth.getDestinationMAC(), dstIpV6);
+                    gatewayToLocalHostV6(context, eth);
+                    return;
                 }
 
                 // Check if this is L3 routing (destination is our virtual gateway MAC)
@@ -1105,14 +1145,22 @@ public class AppComponent {
         byte type = icmp6.getIcmpType();
 
         if (type == ICMP6.NEIGHBOR_ADVERTISEMENT) {
-            NeighborAdvertisement2 na = (NeighborAdvertisement2) icmp6.getPayload();
-            byte[] targetBytes = na.getTargetAddress();
-            Ip6Address targetIp = Ip6Address.valueOf(targetBytes);
-            MacAddress cachedDstMac = ip6ToMacTable.asJavaMap().get(targetIp);
-            ConnectPoint dstHostPoint = findHostEdgePoint(cachedDstMac);
+            // Deserialize with custom class to avoid ClassCastException
+            // (ONOS returns built-in NeighborAdvertisement, not our custom class)
+            try {
+                byte[] naBytes = icmp6.getPayload().serialize();
+                NeighborAdvertisement2 na = NeighborAdvertisement2.deserializer()
+                        .deserialize(naBytes, 0, naBytes.length);
+                byte[] targetBytes = na.getTargetAddress();
+                Ip6Address targetIp = Ip6Address.valueOf(targetBytes);
+                MacAddress cachedDstMac = ip6ToMacTable.asJavaMap().get(targetIp);
+                ConnectPoint dstHostPoint = findHostEdgePoint(cachedDstMac);
 
-            if (dstHostPoint != null) {
-                packetOut(dstHostPoint, eth);
+                if (dstHostPoint != null) {
+                    packetOut(dstHostPoint, eth);
+                }
+            } catch (Exception e) {
+                log.warn("Failed to deserialize Neighbor Advertisement: {}", e.getMessage());
             }
 
             return;
@@ -1310,6 +1358,72 @@ public class AppComponent {
     }
 
     /**
+     * Handle IPv6 packets intercepted by virtual gateway interception rule.
+     * These are packets from AS65351 (via frr0) destined to local hosts with:
+     * - dstMAC = frr0 MAC
+     * - dstIP = local host IPv6 (in local SDN prefix, but not frr0's IP)
+     *
+     * Virtual gateway performs L3 routing:
+     * 1. Lookup destination MAC in NDP table
+     * 2. If MAC found: rewrite src MAC to virtualGatewayMac, dst MAC to host MAC, forward
+     * 3. If MAC not found: send NDP solicitation to discover host
+     * 4. Install per-host flow rule for subsequent packets
+     */
+    private void gatewayToLocalHostV6(PacketContext context, Ethernet eth) {
+        IPv6 ipv6 = (IPv6) eth.getPayload();
+        Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
+        Ip6Address srcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
+        DeviceId ingressDevice = context.inPacket().receivedFrom().deviceId();
+
+        log.info("[Gateway] Inter-AS IPv6 packet to local subnet: src {} -> dst {} on device {}",
+                srcIp, dstIp, ingressDevice);
+
+        // Lookup destination MAC in NDP table
+        MacAddress dstMac = ip6ToMacTable.asJavaMap().get(dstIp);
+
+        if (dstMac != null) {
+            log.info("[Gateway] MAC found for {}: {}. Routing packet.", dstIp, dstMac);
+
+            // Find the output port for destination MAC
+            ConnectPoint outPoint = findHostEdgePoint(dstMac);
+
+            if (outPoint == null) {
+                // Try bridge table - ONLY search the ingress device (where frr0 is connected)
+                // Local hosts should be reachable from the same device
+                Map<MacAddress, PortNumber> macTable = bridgeTable.get(ingressDevice);
+                if (macTable != null) {
+                    PortNumber outPort = macTable.get(dstMac);
+                    if (outPort != null) {
+                        outPoint = new ConnectPoint(ingressDevice, outPort);
+                    }
+                }
+            }
+
+            if (outPoint != null) {
+                // Rewrite MAC addresses and forward
+                Ethernet routedPkt = eth.duplicate();
+                routedPkt.setSourceMACAddress(virtualGatewayMac);
+                routedPkt.setDestinationMACAddress(dstMac);
+
+                log.info("[Gateway] Routing IPv6 to local host {} via port {}/{}",
+                        dstIp, outPoint.deviceId(), outPoint.port());
+
+                packetOut(outPoint, routedPkt);
+
+                // Install per-host flow rule for subsequent packets
+                installFrr0ToLocalHostFlowRuleV6(context, dstIp, dstMac, outPoint);
+            } else {
+                log.warn("[Gateway] Cannot find output port for MAC {}. Dropping packet.", dstMac);
+            }
+        } else {
+            // MAC not found - send NDP solicitation to discover host
+            log.info("[Gateway] MAC not found for {}. Sending NDP solicitation.", dstIp);
+            sendNdpSolicitation(dstIp);
+            // Packet is dropped - sender will retransmit after NDP completes
+        }
+    }
+
+    /**
      * Route IPv4 packet to peer VXLAN port.
      * Rewrites MAC addresses and sends to the peer VXLAN connect point.
      */
@@ -1451,10 +1565,25 @@ public class AppComponent {
         // Determine the destination MAC based on the next hop
         MacAddress dstMac = null;
         if (nextHop != null) {
-            dstMac = ip6ToMacTable.asJavaMap().get(nextHop.getIp6Address());
+            Ip6Address nextHopIp6 = nextHop.getIp6Address();
+
+            // Handle link-local next-hops (fe80::) - derive MAC from EUI-64 and route directly
+            if (nextHopIp6.isLinkLocal()) {
+                MacAddress derivedMac = macFromLinkLocal(nextHopIp6);
+                log.info("[Gateway] L3 IPv6: Next-hop {} is link-local. Derived MAC: {}",
+                        nextHopIp6, derivedMac);
+                routePacket(context, eth, derivedMac);
+                return;
+            }
+
+            dstMac = ip6ToMacTable.asJavaMap().get(nextHopIp6);
             if (dstMac == null) {
-                log.warn("[Gateway] L3 IPv6: MAC for next-hop {} not found. Packet may be dropped.", nextHop);
-                // Optional: We could trigger an NDP for the next-hop here
+                log.warn("[Gateway] L3 IPv6: MAC for next-hop {} not found. Forwarding to frr0.", nextHop);
+                // Forward to frr0 as fallback when next-hop MAC is unknown
+                if (frr0Mac != null) {
+                    routePacket(context, eth, frr0Mac);
+                    return;
+                }
             }
         } else {
             // Fallback to original logic if RouteService has no entry
@@ -1869,40 +1998,63 @@ public class AppComponent {
      * They need to be intercepted and handled by virtual gateway for proper L3 routing.
      */
     private void installVirtualGatewayInterceptRule() {
-        if (frr0Mac == null || frr0ConnectPoint == null || localSdnPrefix == null || frr0Ip4 == null) {
-            log.warn("Cannot install virtual gateway intercept rule: frr0Mac={}, frr0ConnectPoint={}, " +
-                    "localSdnPrefix={}, frr0Ip4={}", frr0Mac, frr0ConnectPoint, localSdnPrefix, frr0Ip4);
+        if (frr0Mac == null || frr0ConnectPoint == null) {
+            log.warn("Cannot install virtual gateway intercept rule: frr0Mac={}, frr0ConnectPoint={}",
+                    frr0Mac, frr0ConnectPoint);
             return;
         }
 
         // Install on the device where frr0 is connected (ovs1)
         DeviceId deviceId = frr0ConnectPoint.deviceId();
 
-        // Selector: dstMAC = frr0 MAC, dstIP in local SDN subnet
-        // This catches packets that frr0 routed to local hosts
-        TrafficSelector selector = DefaultTrafficSelector.builder()
-                .matchEthType(Ethernet.TYPE_IPV4)
-                .matchEthDst(frr0Mac)
-                .matchIPDst(localSdnPrefix)
-                .build();
-
         // Treatment: Send to controller for virtual gateway processing
         TrafficTreatment treatment = DefaultTrafficTreatment.builder()
                 .setOutput(PortNumber.CONTROLLER)
                 .build();
 
-        FlowRule flowRule = DefaultFlowRule.builder()
-                .forDevice(deviceId)
-                .withSelector(selector)
-                .withTreatment(treatment)
-                .withPriority(50) // Higher than L3 routing (40) but lower than internal peer forwarding (45)
-                .fromApp(appId)
-                .makePermanent()
-                .build();
+        // IPv4 intercept rule: dstMAC = frr0 MAC, dstIP in local SDN subnet
+        if (localSdnPrefix != null && frr0Ip4 != null) {
+            TrafficSelector selectorV4 = DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV4)
+                    .matchEthDst(frr0Mac)
+                    .matchIPDst(localSdnPrefix)
+                    .build();
 
-        flowRuleService.applyFlowRules(flowRule);
-        log.info("Installed virtual gateway intercept rule on device {} for dstMAC={}, dstIP={}",
-                deviceId, frr0Mac, localSdnPrefix);
+            FlowRule flowRuleV4 = DefaultFlowRule.builder()
+                    .forDevice(deviceId)
+                    .withSelector(selectorV4)
+                    .withTreatment(treatment)
+                    .withPriority(50)
+                    .fromApp(appId)
+                    .makePermanent()
+                    .build();
+
+            flowRuleService.applyFlowRules(flowRuleV4);
+            log.info("Installed virtual gateway IPv4 intercept rule on device {} for dstMAC={}, dstIP={}",
+                    deviceId, frr0Mac, localSdnPrefix);
+        }
+
+        // IPv6 intercept rule: dstMAC = frr0 MAC, dstIP in local SDN IPv6 subnet
+        if (localSdnPrefix6 != null && frr0Ip6 != null) {
+            TrafficSelector selectorV6 = DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV6)
+                    .matchEthDst(frr0Mac)
+                    .matchIPv6Dst(localSdnPrefix6)
+                    .build();
+
+            FlowRule flowRuleV6 = DefaultFlowRule.builder()
+                    .forDevice(deviceId)
+                    .withSelector(selectorV6)
+                    .withTreatment(treatment)
+                    .withPriority(50)
+                    .fromApp(appId)
+                    .makePermanent()
+                    .build();
+
+            flowRuleService.applyFlowRules(flowRuleV6);
+            log.info("Installed virtual gateway IPv6 intercept rule on device {} for dstMAC={}, dstIP={}",
+                    deviceId, frr0Mac, localSdnPrefix6);
+        }
     }
 
     /**
@@ -1954,6 +2106,58 @@ public class AppComponent {
 
         flowRuleService.applyFlowRules(flowRule);
         log.info("Installed per-host flow rule on device {} for dstIP={} -> dstMAC={}, outPort={}",
+                deviceId, dstIp, dstMac, outPoint.port());
+    }
+
+    /**
+     * Install per-host IPv6 flow rule for packets from frr0 to local hosts.
+     * This optimizes subsequent packets by handling them in the data plane.
+     *
+     * Flow rule matches:
+     * - dstMAC = frr0 MAC
+     * - dstIP = specific local host IPv6
+     *
+     * Actions:
+     * - Rewrite srcMAC to virtualGatewayMac
+     * - Rewrite dstMAC to host MAC
+     * - Forward to host port
+     */
+    private void installFrr0ToLocalHostFlowRuleV6(PacketContext context, Ip6Address dstIp,
+                                                   MacAddress dstMac, ConnectPoint outPoint) {
+        DeviceId deviceId = context.inPacket().receivedFrom().deviceId();
+
+        // Only install flow rule if packet came from and goes to the same device
+        if (!deviceId.equals(outPoint.deviceId())) {
+            log.debug("Not installing IPv6 flow rule: packet traverses devices {} -> {}",
+                    deviceId, outPoint.deviceId());
+            return;
+        }
+
+        // Selector: dstMAC = frr0 MAC, dstIP = specific host IPv6
+        TrafficSelector selector = DefaultTrafficSelector.builder()
+                .matchEthType(Ethernet.TYPE_IPV6)
+                .matchEthDst(frr0Mac)
+                .matchIPv6Dst(IpPrefix.valueOf(dstIp, 128))
+                .build();
+
+        // Treatment: rewrite MACs and forward to host port
+        TrafficTreatment treatment = DefaultTrafficTreatment.builder()
+                .setEthSrc(virtualGatewayMac)
+                .setEthDst(dstMac)
+                .setOutput(outPoint.port())
+                .build();
+
+        FlowRule flowRule = DefaultFlowRule.builder()
+                .forDevice(deviceId)
+                .withSelector(selector)
+                .withTreatment(treatment)
+                .withPriority(60) // Higher priority than intercept rule (50) for specific host routing
+                .fromApp(appId)
+                .makeTemporary(30) // 30-second timeout
+                .build();
+
+        flowRuleService.applyFlowRules(flowRule);
+        log.info("Installed per-host IPv6 flow rule on device {} for dstIP={} -> dstMAC={}, outPort={}",
                 deviceId, dstIp, dstMac, outPoint.port());
     }
 
