@@ -173,6 +173,10 @@ public class AppComponent {
     // Stores pairs of [localIp, peerIp] for internal BGP peering
     private List<Ip6Address[]> internalV6Peers = new ArrayList<>();
 
+    // Internal IPv4 peer configuration (for inter-AS BGP, e.g., frr0 <-> frr1 on 192.168.63.0/24)
+    // Stores pairs of [localIp, peerIp] for internal BGP peering
+    private List<Ip4Address[]> internalV4Peers = new ArrayList<>();
+
     // Peer VXLAN configuration (for peer network communication)
     private ConnectPoint peer1VxlanCp;
     private ConnectPoint peer2VxlanCp;
@@ -290,19 +294,31 @@ public class AppComponent {
             log.info("Loaded frr0 connect point: {}", frr0ConnectPoint);
             log.info("Loaded frr1 connect point: {}", frr1ConnectPoint);
 
-            // Parse v4-peer to get WAN local and all peer IPs
+            // Parse v4-peer to get WAN local, WAN peers, and internal peers
             List<String[]> v4Peers = config.v4Peers();
             if (v4Peers != null && !v4Peers.isEmpty()) {
-                // First entry sets local IP
+                // First entry sets local IP for WAN subnet
                 String[] firstPeer = v4Peers.get(0);
                 wanLocalIp4 = Ip4Address.valueOf(firstPeer[0]);
 
-                // Clear previous peers and add all peer IPs
+                // Clear previous peers
                 wanPeerIp4List.clear();
+                internalV4Peers.clear();
+
+                // Classify peers: WAN (same local IP as first) vs internal (different local IP)
                 for (String[] peer : v4Peers) {
+                    Ip4Address localIp = Ip4Address.valueOf(peer[0]);
                     Ip4Address peerIp = Ip4Address.valueOf(peer[1]);
-                    wanPeerIp4List.add(peerIp);
-                    log.info("Loaded WAN v4 peer: local={}, peer={}", peer[0], peerIp);
+
+                    if (localIp.equals(wanLocalIp4)) {
+                        // WAN peer (same local IP as first entry)
+                        wanPeerIp4List.add(peerIp);
+                        log.info("Loaded WAN v4 peer: local={}, peer={}", localIp, peerIp);
+                    } else {
+                        // Internal peer (different local IP, e.g., frr0-frr1 on 192.168.63.0/24)
+                        internalV4Peers.add(new Ip4Address[] { localIp, peerIp });
+                        log.info("Loaded internal v4 peer: local={}, peer={}", localIp, peerIp);
+                    }
                 }
             }
 
@@ -372,8 +388,11 @@ public class AppComponent {
             // Install WAN forwarding intents
             installWanForwardingIntents();
 
-            // Install internal peer forwarding intents
+            // Install internal peer forwarding intents (IPv6)
             installInternalPeerForwardingIntents();
+
+            // Install internal peer forwarding flow rules (IPv4)
+            installInternalPeerForwardingFlowRules();
 
             // Load peer VXLAN configuration
             peer1VxlanCp = config.peer1VxlanCp();
@@ -1623,12 +1642,90 @@ public class AppComponent {
     }
 
     /**
+     * Install bidirectional flow rules for internal IPv4 peer traffic.
+     * This enables BGP communication between frr0 and frr1 on the 192.168.63.0/24 network.
+     * Uses direct flow rules instead of intents since both routers are on the same switch.
+     */
+    private void installInternalPeerForwardingFlowRules() {
+        if (internalV4Peers.isEmpty()) {
+            log.info("No internal IPv4 peers configured");
+            return;
+        }
+
+        if (frr0ConnectPoint == null || frr1ConnectPoint == null) {
+            log.warn("Cannot install internal peer flow rules: frr0ConnectPoint={}, frr1ConnectPoint={}",
+                    frr0ConnectPoint, frr1ConnectPoint);
+            return;
+        }
+
+        // Both frr0 and frr1 should be on the same device for direct flow rules
+        if (!frr0ConnectPoint.deviceId().equals(frr1ConnectPoint.deviceId())) {
+            log.warn("frr0 and frr1 are on different devices, cannot use direct flow rules");
+            return;
+        }
+
+        DeviceId deviceId = frr0ConnectPoint.deviceId();
+
+        for (Ip4Address[] peerPair : internalV4Peers) {
+            Ip4Address frr0InternalIp = peerPair[0]; // e.g., 192.168.63.1
+            Ip4Address frr1InternalIp = peerPair[1]; // e.g., 192.168.63.2
+
+            // Flow rule 1: Traffic to frr0's internal IP -> output to frr0 port
+            TrafficSelector toFrr0Selector = DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV4)
+                    .matchIPDst(IpPrefix.valueOf(frr0InternalIp, 32))
+                    .build();
+
+            TrafficTreatment toFrr0Treatment = DefaultTrafficTreatment.builder()
+                    .setOutput(frr0ConnectPoint.port())
+                    .build();
+
+            FlowRule toFrr0Rule = DefaultFlowRule.builder()
+                    .forDevice(deviceId)
+                    .withSelector(toFrr0Selector)
+                    .withTreatment(toFrr0Treatment)
+                    .withPriority(45)
+                    .fromApp(appId)
+                    .makePermanent()
+                    .build();
+
+            flowRuleService.applyFlowRules(toFrr0Rule);
+            log.info("Installed internal peer flow rule: to {} -> port {}",
+                    frr0InternalIp, frr0ConnectPoint.port());
+
+            // Flow rule 2: Traffic to frr1's internal IP -> output to frr1 port
+            TrafficSelector toFrr1Selector = DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV4)
+                    .matchIPDst(IpPrefix.valueOf(frr1InternalIp, 32))
+                    .build();
+
+            TrafficTreatment toFrr1Treatment = DefaultTrafficTreatment.builder()
+                    .setOutput(frr1ConnectPoint.port())
+                    .build();
+
+            FlowRule toFrr1Rule = DefaultFlowRule.builder()
+                    .forDevice(deviceId)
+                    .withSelector(toFrr1Selector)
+                    .withTreatment(toFrr1Treatment)
+                    .withPriority(45)
+                    .fromApp(appId)
+                    .makePermanent()
+                    .build();
+
+            flowRuleService.applyFlowRules(toFrr1Rule);
+            log.info("Installed internal peer flow rule: to {} -> port {}",
+                    frr1InternalIp, frr1ConnectPoint.port());
+
+            log.info("Internal IPv4 BGP forwarding enabled: {} <-> {}", frr0InternalIp, frr1InternalIp);
+        }
+    }
+
+    /**
      * Install bidirectional PointToPointIntents for internal IPv6 peer traffic.
      * This enables BGP communication between frr0 and frr1 on the fd63::/64
      * network.
      */
     private void installInternalPeerForwardingIntents() {
-        // TODO: Implement similar intents for IPv4 internal peers if needed
         if (internalV6Peers.isEmpty()) {
             log.info("No internal IPv6 peers configured");
             return;
