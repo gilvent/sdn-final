@@ -15,7 +15,7 @@ if [ -z "$1" ]; then
 fi
 
 NEW_ID="$1"
-OLD_ID=34
+OLD_ID=35
 
 if [ "$NEW_ID" = "$OLD_ID" ]; then
     echo "New ID ($NEW_ID) is the same as current ID ($OLD_ID). Nothing to do."
@@ -82,9 +82,6 @@ swap_in_file "$vrouter_conf" "00:00:00:00:" ":02"
 
 # Solicited-node multicast: ff02::1:ff00:XX
 swap_in_file "$vrouter_conf" "ff02::1:ff00:" ""
-
-# --- 4. Update OLD_ID for future runs ---
-sed -i "s/^OLD_ID=.*/OLD_ID=${NEW_ID}/" "${SCRIPT_DIR}/prepare_network_id.sh"
 
 echo "Done! Network IDs swapped: ${OLD_ID} <-> ${NEW_ID}"
 echo ""

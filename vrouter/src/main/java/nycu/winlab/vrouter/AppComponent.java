@@ -416,6 +416,9 @@ public class AppComponent {
             peer2GatewayMac = config.peer2GatewayMac();
             log.info("Loaded peer gateway MACs: peer1={}, peer2={}",
                     peer1GatewayMac, peer2GatewayMac);
+
+            // Install virtual gateway interception rule
+            installVirtualGatewayInterceptRule();
         }
     }
 
@@ -544,6 +547,8 @@ public class AppComponent {
             // Handle IPv4 packets
             if (eth.getEtherType() == Ethernet.TYPE_IPV4) {
                 ConnectPoint srcPoint = context.inPacket().receivedFrom();
+                IPv4 ipv4 = (IPv4) eth.getPayload();
+                Ip4Address dstIp = Ip4Address.valueOf(ipv4.getDestinationAddress());
 
                 // Handle incoming IPv4 from peer VXLAN ports
                 if (isPeerVxlanPort(srcPoint)) {
@@ -553,8 +558,6 @@ public class AppComponent {
 
                 // Block IPv4 from WAN port that isn't destined for frr0's WAN IP
                 if (externalPort != null && srcPoint.equals(externalPort)) {
-                    IPv4 ipv4 = (IPv4) eth.getPayload();
-                    Ip4Address dstIp = Ip4Address.valueOf(ipv4.getDestinationAddress());
                     if (wanLocalIp4 == null || !dstIp.equals(wanLocalIp4)) {
                         // Drop external IPv4 traffic not destined for frr0
                         return;
@@ -568,9 +571,6 @@ public class AppComponent {
 
                 // Handle IPv4 traffic FROM frr0 TO WAN peers (outbound BGP traffic)
                 if (frr0ConnectPoint != null && srcPoint.equals(frr0ConnectPoint) && !wanPeerIp4List.isEmpty()) {
-                    IPv4 ipv4 = (IPv4) eth.getPayload();
-                    Ip4Address dstIp = Ip4Address.valueOf(ipv4.getDestinationAddress());
-
                     // Forward traffic destined to any WAN peer to external port
                     for (Ip4Address peerIp : wanPeerIp4List) {
                         if (dstIp.equals(peerIp)) {
@@ -582,12 +582,23 @@ public class AppComponent {
                     }
                 }
 
+                // Check for intercepted packets: dstMAC = frr0 MAC, dstIP in local subnet (but not frr0's IP)
+                // These are packets routed by frr0 to local hosts that need virtual gateway handling
+                if (frr0Mac != null && eth.getDestinationMAC().equals(frr0Mac) &&
+                        localSdnPrefix != null && localSdnPrefix.contains(dstIp) &&
+                        frr0Ip4 != null && !dstIp.equals(frr0Ip4)) {
+                    log.info("[Gateway] Intercept Inter-AS packet to local host (for frr0): dstMAC={}, dstIP={}",
+                            eth.getDestinationMAC(), dstIp);
+                    gatewayToLocalHost(context, eth);
+                    return;
+                }
+
                 // Check if this is L3 routing (destination is our virtual gateway MAC)
                 if (virtualGatewayMac != null && eth.getDestinationMAC().equals(virtualGatewayMac)) {
                     handleL3RoutingIPv4(context, eth);
                     return;
                 }
-                handleLearningBridge(context, eth);
+                forwardByLearningBridge(context, eth);
                 return;
             }
 
@@ -662,7 +673,7 @@ public class AppComponent {
                 }
 
                 // Handle other IPv6 traffic with learning bridge
-                handleLearningBridge(context, eth);
+                forwardByLearningBridge(context, eth);
                 return;
             }
         }
@@ -1233,6 +1244,72 @@ public class AppComponent {
     }
 
     /**
+     * Handle packets intercepted by virtual gateway interception rule.
+     * These are packets from AS65351 (via frr0) destined to local hosts with:
+     * - dstMAC = frr0 MAC
+     * - dstIP = local host IP (in 172.16.35.0/24, but not frr0's IP)
+     *
+     * Virtual gateway performs L3 routing:
+     * 1. Lookup destination MAC in ARP table
+     * 2. If MAC found: rewrite src MAC to virtualGatewayMac, dst MAC to host MAC, forward
+     * 3. If MAC not found: send ARP request to discover host
+     * 4. Install per-host flow rule for subsequent packets
+     */
+    private void gatewayToLocalHost(PacketContext context, Ethernet eth) {
+        IPv4 ipv4 = (IPv4) eth.getPayload();
+        Ip4Address dstIp = Ip4Address.valueOf(ipv4.getDestinationAddress());
+        Ip4Address srcIp = Ip4Address.valueOf(ipv4.getSourceAddress());
+        DeviceId ingressDevice = context.inPacket().receivedFrom().deviceId();
+
+        log.info("[Gateway] Inter-AS packet to local subnet: src {} -> dst {} on device {}",
+                srcIp, dstIp, ingressDevice);
+
+        // Lookup destination MAC in ARP table
+        MacAddress dstMac = ipToMacTable.asJavaMap().get(dstIp);
+
+        if (dstMac != null) {
+            log.info("[Gateway] MAC found for {}: {}. Routing packet.", dstIp, dstMac);
+
+            // Find the output port for destination MAC
+            ConnectPoint outPoint = findHostEdgePoint(dstMac);
+
+            if (outPoint == null) {
+                // Try bridge table - ONLY search the ingress device (where frr0 is connected)
+                // Local hosts should be reachable from the same device
+                Map<MacAddress, PortNumber> macTable = bridgeTable.get(ingressDevice);
+                if (macTable != null) {
+                    PortNumber outPort = macTable.get(dstMac);
+                    if (outPort != null) {
+                        outPoint = new ConnectPoint(ingressDevice, outPort);
+                    }
+                }
+            }
+
+            if (outPoint != null) {
+                // Rewrite MAC addresses and forward
+                Ethernet routedPkt = eth.duplicate();
+                routedPkt.setSourceMACAddress(virtualGatewayMac);
+                routedPkt.setDestinationMACAddress(dstMac);
+
+                log.info("[Gateway] Routing to local host {} via port {}/{}",
+                        dstIp, outPoint.deviceId(), outPoint.port());
+
+                packetOut(outPoint, routedPkt);
+
+                // Install per-host flow rule for subsequent packets
+                installFrr0ToLocalHostFlowRule(context, dstIp, dstMac, outPoint);
+            } else {
+                log.warn("[Gateway] Cannot find output port for MAC {}. Dropping packet.", dstMac);
+            }
+        } else {
+            // MAC not found - send ARP request to discover host
+            log.info("[Gateway] MAC not found for {}. Sending ARP request.", dstIp);
+            sendArpRequest(dstIp);
+            // Packet is dropped - sender will retransmit after ARP completes
+        }
+    }
+
+    /**
      * Route IPv4 packet to peer VXLAN port.
      * Rewrites MAC addresses and sends to the peer VXLAN connect point.
      */
@@ -1489,7 +1566,7 @@ public class AppComponent {
         log.info("Installed L3 flow rule for destination IP on device {}", deviceId);
     }
 
-    private void handleLearningBridge(PacketContext context, Ethernet ethPkt) {
+    private void forwardByLearningBridge(PacketContext context, Ethernet ethPkt) {
         InboundPacket pkt = context.inPacket();
 
         DeviceId recDevId = pkt.receivedFrom().deviceId();
@@ -1498,7 +1575,7 @@ public class AppComponent {
         MacAddress dstMac = ethPkt.getDestinationMAC();
 
         // Receive packet-in from new device, create new table for it
-        log.info("[Learning Bridge] Received a packet-in from device `{}`.", recDevId.toString());
+        log.info("[Learning Bridge] Received a packet-in from device `{}/{}`.", recDevId.toString(), recPort.toString());
         if (bridgeTable.get(recDevId) == null) {
             bridgeTable.put(recDevId, new HashMap<>());
         }
@@ -1514,15 +1591,15 @@ public class AppComponent {
         // Forward based on destination MAC
         if (bridgeTable.get(recDevId).get(dstMac) == null) {
             // MAC address not found, flood the packet
-            log.info("[Learning Bridge] MAC address `{}` is missed on `{}`. Flood the packet.", dstMac.toString(),
-                    recDevId.toString());
+            log.info("[Learning Bridge] MAC address `{}` is missed on `{}/{}`. Flood the packet.", dstMac.toString(),
+                    recDevId.toString(), recPort.toString());
             flood(context);
 
         } else {
             // MAC address found, install flow rule
-            log.info("[Learning Bridge] MAC address `{}` is matched on `{}`. Install a flow rule.", dstMac.toString(),
-                    recDevId.toString());
-            installRule(context, bridgeTable.get(recDevId).get(dstMac));
+            log.info("[Learning Bridge] MAC address `{}` is matched on `{}/{}`. Install a flow rule.", dstMac.toString(),
+                    recDevId.toString(), recPort.toString());
+            installL2Rule(context, bridgeTable.get(recDevId).get(dstMac));
         }
     }
 
@@ -1550,7 +1627,7 @@ public class AppComponent {
         context.send();
     }
 
-    private void installRule(PacketContext context, PortNumber portNumber) {
+    private void installL2Rule(PacketContext context, PortNumber portNumber) {
         Ethernet inPkt = context.inPacket().parsed();
 
         TrafficSelector selector = DefaultTrafficSelector.builder()
@@ -1781,6 +1858,103 @@ public class AppComponent {
 
             log.info("Internal IPv6 BGP forwarding enabled: {} <-> {}", frr0InternalIp, frr1InternalIp);
         }
+    }
+
+    /**
+     * Install flow rule to intercept packets where:
+     * - dstMAC = frr0 MAC
+     * - dstIP is in local SDN subnet (172.16.35.0/24) but NOT frr0's IP (172.16.35.69)
+     *
+     * These packets are from AS65351 (h3) routed by frr0 to local hosts.
+     * They need to be intercepted and handled by virtual gateway for proper L3 routing.
+     */
+    private void installVirtualGatewayInterceptRule() {
+        if (frr0Mac == null || frr0ConnectPoint == null || localSdnPrefix == null || frr0Ip4 == null) {
+            log.warn("Cannot install virtual gateway intercept rule: frr0Mac={}, frr0ConnectPoint={}, " +
+                    "localSdnPrefix={}, frr0Ip4={}", frr0Mac, frr0ConnectPoint, localSdnPrefix, frr0Ip4);
+            return;
+        }
+
+        // Install on the device where frr0 is connected (ovs1)
+        DeviceId deviceId = frr0ConnectPoint.deviceId();
+
+        // Selector: dstMAC = frr0 MAC, dstIP in local SDN subnet
+        // This catches packets that frr0 routed to local hosts
+        TrafficSelector selector = DefaultTrafficSelector.builder()
+                .matchEthType(Ethernet.TYPE_IPV4)
+                .matchEthDst(frr0Mac)
+                .matchIPDst(localSdnPrefix)
+                .build();
+
+        // Treatment: Send to controller for virtual gateway processing
+        TrafficTreatment treatment = DefaultTrafficTreatment.builder()
+                .setOutput(PortNumber.CONTROLLER)
+                .build();
+
+        FlowRule flowRule = DefaultFlowRule.builder()
+                .forDevice(deviceId)
+                .withSelector(selector)
+                .withTreatment(treatment)
+                .withPriority(50) // Higher than L3 routing (40) but lower than internal peer forwarding (45)
+                .fromApp(appId)
+                .makePermanent()
+                .build();
+
+        flowRuleService.applyFlowRules(flowRule);
+        log.info("Installed virtual gateway intercept rule on device {} for dstMAC={}, dstIP={}",
+                deviceId, frr0Mac, localSdnPrefix);
+    }
+
+    /**
+     * Install per-host flow rule for packets from frr0 to local hosts.
+     * This optimizes subsequent packets by handling them in the data plane.
+     *
+     * Flow rule matches:
+     * - dstMAC = frr0 MAC
+     * - dstIP = specific local host IP
+     *
+     * Actions:
+     * - Rewrite srcMAC to virtualGatewayMac
+     * - Rewrite dstMAC to host MAC
+     * - Forward to host port
+     */
+    private void installFrr0ToLocalHostFlowRule(PacketContext context, Ip4Address dstIp,
+                                                  MacAddress dstMac, ConnectPoint outPoint) {
+        DeviceId deviceId = context.inPacket().receivedFrom().deviceId();
+
+        // Only install flow rule if packet came from and goes to the same device
+        if (!deviceId.equals(outPoint.deviceId())) {
+            log.debug("Not installing flow rule: packet traverses devices {} -> {}",
+                    deviceId, outPoint.deviceId());
+            return;
+        }
+
+        // Selector: dstMAC = frr0 MAC, dstIP = specific host IP
+        TrafficSelector selector = DefaultTrafficSelector.builder()
+                .matchEthType(Ethernet.TYPE_IPV4)
+                .matchEthDst(frr0Mac)
+                .matchIPDst(IpPrefix.valueOf(dstIp, 32))
+                .build();
+
+        // Treatment: rewrite MACs and forward to host port
+        TrafficTreatment treatment = DefaultTrafficTreatment.builder()
+                .setEthSrc(virtualGatewayMac)
+                .setEthDst(dstMac)
+                .setOutput(outPoint.port())
+                .build();
+
+        FlowRule flowRule = DefaultFlowRule.builder()
+                .forDevice(deviceId)
+                .withSelector(selector)
+                .withTreatment(treatment)
+                .withPriority(60) // Higher priority than intercept rule (50) for specific host routing
+                .fromApp(appId)
+                .makeTemporary(30) // 30-second timeout
+                .build();
+
+        flowRuleService.applyFlowRules(flowRule);
+        log.info("Installed per-host flow rule on device {} for dstIP={} -> dstMAC={}, outPort={}",
+                deviceId, dstIp, dstMac, outPoint.port());
     }
 
 }
