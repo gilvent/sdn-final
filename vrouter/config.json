@@ -31,8 +31,7 @@
         "peer1-sdn-prefix6": "2a0b:4e07:c4:34::/64",
         "peer2-sdn-prefix6": "2a0b:4e07:c4:36::/64",
         "local-sdn-prefix6": "2a0b:4e07:c4:35::/64",
-        "peer1-gateway-mac": "00:00:00:00:34:02",
-        "peer2-gateway-mac": "00:00:00:00:36:02"
+        "local-traditional-prefix": "172.17.35.0/24"
       }
     }
   },
@@ -40,12 +39,23 @@
     "of:0000ceaa83f3a445/3": {
       "interfaces": [
         {
-          "name": "eth1",
+          "name": "wan",
           "ips": [
             "192.168.70.35/24",
             "fd70::35/64",
-            "ff02::1:ff00:35/104",
-            "fe80::42:c0ff:fea8:46fd/128"
+            "fe80::846:72ff:fefc:603c/64"
+          ]
+        }
+      ]
+    },
+    "of:0000000000000001/5": {
+      "interfaces": [
+        {
+          "name": "inter-as",
+          "ips": [
+            "192.168.63.2/24",
+            "fd63::2/64",
+            "fe80::b8a7:aeff:fee3:48af/64"
           ]
         }
       ]
