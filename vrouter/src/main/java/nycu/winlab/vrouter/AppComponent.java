@@ -881,7 +881,20 @@ public class AppComponent {
         }
 
         HostLocation loc = host.location();
-        return new ConnectPoint(loc.deviceId(), loc.port());
+        ConnectPoint cp = new ConnectPoint(loc.deviceId(), loc.port());
+
+        // Filter out WAN and peer VXLAN ports - local hosts cannot be located there
+        // HostService may incorrectly learn MAC locations from flooded/transit traffic
+        if (externalPort != null && cp.equals(externalPort)) {
+            log.debug("Ignoring HostService location on WAN port for MAC {}", dstMac);
+            return null;
+        }
+        if (isPeerVxlanPort(cp)) {
+            log.debug("Ignoring HostService location on peer VXLAN port for MAC {}", dstMac);
+            return null;
+        }
+
+        return cp;
     }
 
     private void handleARP(PacketContext context, Ethernet eth) {
