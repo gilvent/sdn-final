@@ -181,6 +181,7 @@ public class AppComponent {
     private IpPrefix peer2SdnPrefix6;
     private IpPrefix localSdnPrefix6;
     private IpPrefix localTraditionalPrefix;
+    private IpPrefix localTraditionalPrefix6;
 
     private ConsistentMap<Ip4Address, MacAddress> ipToMacTable;
     private ConsistentMap<Ip6Address, MacAddress> ip6ToMacTable;
@@ -390,7 +391,8 @@ public class AppComponent {
 
             // Load local traditional network prefix
             localTraditionalPrefix = config.localTraditionalPrefix();
-            log.info("Loaded local traditional prefix: {}", localTraditionalPrefix);
+            localTraditionalPrefix6 = config.localTraditionalPrefix6();
+            log.info("Loaded local traditional prefix: {}, IPv6: {}", localTraditionalPrefix, localTraditionalPrefix6);
 
             installVirtualGatewayInterceptRule();
         }
@@ -590,10 +592,17 @@ public class AppComponent {
                 ConnectPoint srcPoint = context.inPacket().receivedFrom();
                 IPv6 ipv6 = (IPv6) eth.getPayload();
 
-                // Handle incoming IPv6 from peer VXLAN ports
+                // Security check for peer VXLAN (only allow traffic to local SDN prefix)
                 if (isPeerVxlanPort(srcPoint)) {
-                    handleIncomingPeerVxlanIPv6(context, eth);
-                    return;
+                    Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
+                    Ip6Address srcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
+
+                    if (localSdnPrefix6 == null || !localSdnPrefix6.contains(dstIp)) {
+                        log.warn("[Peer VXLAN] Blocked IPv6: src {} -> dst {} (not in local SDN)", srcIp, dstIp);
+                        return;
+                    }
+                    log.info("[Peer VXLAN] Allowed IPv6: src {} -> dst {}", srcIp, dstIp);
+                    // Fall through to normal processing (frr0Mac intercept)
                 }
 
                 // Handle traffic FROM WAN port (inbound)
@@ -610,18 +619,24 @@ public class AppComponent {
                         }
                     }
 
-                    // Block non-NDP IPv6 not destined for frr0
-                    if (wanLocalIp6 == null || !dstIp.equals(wanLocalIp6)) {
-                        log.debug("Blocking WAN IPv6 not for frr0: dstIp={}", dstIp);
+                    // Allow traffic to frr0's WAN IP
+                    if (wanLocalIp6 != null && dstIp.equals(wanLocalIp6)) {
+                        if (frr0ConnectPoint != null) {
+                            log.info("Forwarding WAN IPv6 to frr0: {} -> {}", dstIp, frr0ConnectPoint);
+                            packetOut(frr0ConnectPoint, eth);
+                        }
                         return;
                     }
 
-                    // Traffic to frr0's WAN IPv6 - forward to frr0
-                    if (frr0ConnectPoint != null) {
-                        log.info("Forwarding WAN IPv6 to frr0: {} -> {}", dstIp, frr0ConnectPoint);
-                        packetOut(frr0ConnectPoint, eth);
+                    // Allow traffic to local traditional prefix (return traffic from h3 via WAN)
+                    if (localTraditionalPrefix6 != null && localTraditionalPrefix6.contains(dstIp)) {
+                        log.info("[WAN] Allowing IPv6 traffic to traditional network: dstIp={}", dstIp);
+                        // Fall through to L3 routing (frr0Mac intercept will handle it)
+                    } else {
+                        // Block other IPv6 traffic from WAN
+                        log.debug("Blocking WAN IPv6 not for frr0 or traditional: dstIp={}", dstIp);
+                        return;
                     }
-                    return;
                 }
 
                 // Handle traffic TO WAN port (outbound from frr0)
@@ -649,16 +664,26 @@ public class AppComponent {
                     }
                 }
 
-                // Check for intercepted IPv6 packets: dstMAC = frr0 MAC, dstIP in local subnet
-                // (but not frr0's IP)
+                // Check for intercepted IPv6 packets: dstMAC = frr0 MAC (but not frr0's IP)
                 Ip6Address dstIpV6 = Ip6Address.valueOf(ipv6.getDestinationAddress());
                 if (frr0Mac != null && eth.getDestinationMAC().equals(frr0Mac) &&
-                        localSdnPrefix6 != null && localSdnPrefix6.contains(dstIpV6) &&
                         frr0Ip6 != null && !dstIpV6.equals(frr0Ip6)) {
-                    log.info("[Gateway] Intercept Inter-AS IPv6 packet to local host (for frr0): dstMAC={}, dstIP={}",
-                            eth.getDestinationMAC(), dstIpV6);
-                    gatewayToLocalHostV6(context, eth);
-                    return;
+
+                    // Packets to local SDN prefix -> route to local host
+                    if (localSdnPrefix6 != null && localSdnPrefix6.contains(dstIpV6)) {
+                        log.info("[Gateway] Intercept Inter-AS IPv6 packet to local host (for frr0): dstMAC={}, dstIP={}",
+                                eth.getDestinationMAC(), dstIpV6);
+                        gatewayToLocalHostV6(context, eth);
+                        return;
+                    }
+
+                    // Packets to local traditional prefix -> route via L3 (frr0)
+                    if (localTraditionalPrefix6 != null && localTraditionalPrefix6.contains(dstIpV6)) {
+                        log.info("[Gateway] Intercept Peer-to-Traditional IPv6: dstMAC={}, dstIP={}",
+                                eth.getDestinationMAC(), dstIpV6);
+                        handleL3RoutingIPv6(context, eth);
+                        return;
+                    }
                 }
 
                 // Check if this is L3 routing (destination is our virtual gateway MAC)
@@ -1200,38 +1225,6 @@ public class AppComponent {
     }
 
     /**
-     * Handle incoming IPv6 packets from peer VXLAN ports.
-     * Only allows traffic destined to local SDN network.
-     * Routes to local host if MAC is known, otherwise sends NDP to discover.
-     */
-    private void handleIncomingPeerVxlanIPv6(PacketContext context, Ethernet eth) {
-        IPv6 ipv6 = (IPv6) eth.getPayload();
-        Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
-        Ip6Address srcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
-
-        // Security: Only allow traffic destined to local SDN network
-        if (localSdnPrefix6 == null ||
-                !localSdnPrefix6.contains(IpAddress.valueOf(dstIp.toString()))) {
-            return;
-        }
-
-        log.info("[Incoming Peer VXLAN] Allowed IPv6: src {} -> dst {}", srcIp, dstIp);
-
-        // Route to local host - lookup MAC and forward
-        MacAddress dstMac = ip6ToMacTable.asJavaMap().get(dstIp);
-        if (dstMac != null) {
-            log.info("[Incoming Peer VXLAN] Routing to local host: {} -> {}", dstIp, dstMac);
-            routePacket(context, eth, dstMac);
-        } else {
-            // Send NDP solicitation to discover host MAC, drop this packet (sender will
-            // retransmit)
-            log.info("[Incoming Peer VXLAN] MAC not found for {}, sending NDP solicitation", dstIp);
-            sendNdpSolicitation(dstIp);
-            // Packet is dropped - ICMPv6 sender will retransmit after NDP completes
-        }
-    }
-
-    /**
      * Handle packets intercepted by virtual gateway interception rule.
      * These are packets from AS65351 (via frr0) destined to local hosts with:
      * - dstMAC = frr0 MAC
@@ -1586,14 +1579,9 @@ public class AppComponent {
         // Send the packet out
         packetOut(outPoint, routedPkt);
 
-        // Install flow rules for future packets (optional but recommended for
-        // performance)
         installL3FlowRule(context, eth, dstMac, outPoint.port(), outPoint);
     }
 
-    /**
-     * Install a flow rule for L3 routed traffic.
-     */
     private void installL3FlowRule(PacketContext context, Ethernet eth, MacAddress dstMac, PortNumber outPort,
             ConnectPoint outPoint) {
         DeviceId deviceId = context.inPacket().receivedFrom().deviceId();
@@ -2025,6 +2013,28 @@ public class AppComponent {
             flowRuleService.applyFlowRules(flowRuleV6);
             log.info("Installed virtual gateway IPv6 intercept rule on device {} for dstMAC={}, dstIP={}",
                     deviceId, frr0Mac, localSdnPrefix6);
+        }
+
+        // IPv6 intercept rule for traditional network: dstMAC = frr0 MAC, dstIP in local traditional IPv6 subnet
+        if (localTraditionalPrefix6 != null) {
+            TrafficSelector selectorV6Trad = DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV6)
+                    .matchEthDst(frr0Mac)
+                    .matchIPv6Dst(localTraditionalPrefix6)
+                    .build();
+
+            FlowRule flowRuleV6Trad = DefaultFlowRule.builder()
+                    .forDevice(deviceId)
+                    .withSelector(selectorV6Trad)
+                    .withTreatment(treatment)
+                    .withPriority(50)
+                    .fromApp(appId)
+                    .makePermanent()
+                    .build();
+
+            flowRuleService.applyFlowRules(flowRuleV6Trad);
+            log.info("Installed virtual gateway IPv6 intercept rule for traditional network on device {} for dstMAC={}, dstIP={}",
+                    deviceId, frr0Mac, localTraditionalPrefix6);
         }
     }
 
