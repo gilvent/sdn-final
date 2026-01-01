@@ -50,8 +50,7 @@ public class VRouterConfig extends Config<ApplicationId> {
     private static final String PEER1_SDN_PREFIX6 = "peer1-sdn-prefix6";
     private static final String PEER2_SDN_PREFIX6 = "peer2-sdn-prefix6";
     private static final String LOCAL_SDN_PREFIX6 = "local-sdn-prefix6";
-    private static final String PEER1_GATEWAY_MAC = "peer1-gateway-mac";
-    private static final String PEER2_GATEWAY_MAC = "peer2-gateway-mac";
+    private static final String LOCAL_TRADITIONAL_PREFIX = "local-traditional-prefix";
 
     @Override
     public boolean isValid() {
@@ -60,7 +59,7 @@ public class VRouterConfig extends Config<ApplicationId> {
                 VIRTUAL_GATEWAY_MAC, WAN_CONNECT_POINT, V4_PEER, V6_PEER,
                 PEER1_VXLAN_CP, PEER2_VXLAN_CP, PEER1_SDN_PREFIX, PEER2_SDN_PREFIX, LOCAL_SDN_PREFIX,
                 PEER1_SDN_PREFIX6, PEER2_SDN_PREFIX6, LOCAL_SDN_PREFIX6,
-                PEER1_GATEWAY_MAC, PEER2_GATEWAY_MAC);
+                LOCAL_TRADITIONAL_PREFIX);
     }
 
     /**
@@ -234,23 +233,13 @@ public class VRouterConfig extends Config<ApplicationId> {
     }
 
     /**
-     * Gets the peer 1 gateway MAC address.
+     * Gets the local traditional network prefix (e.g., 172.17.35.0/24).
      *
-     * @return MAC address or null if not configured
+     * @return IpPrefix or null if not configured
      */
-    public MacAddress peer1GatewayMac() {
-        String mac = get(PEER1_GATEWAY_MAC, null);
-        return mac != null ? MacAddress.valueOf(mac) : null;
-    }
-
-    /**
-     * Gets the peer 2 gateway MAC address.
-     *
-     * @return MAC address or null if not configured
-     */
-    public MacAddress peer2GatewayMac() {
-        String mac = get(PEER2_GATEWAY_MAC, null);
-        return mac != null ? MacAddress.valueOf(mac) : null;
+    public IpPrefix localTraditionalPrefix() {
+        String prefix = get(LOCAL_TRADITIONAL_PREFIX, null);
+        return prefix != null ? IpPrefix.valueOf(prefix) : null;
     }
 
     /**
