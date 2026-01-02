@@ -1,0 +1,89 @@
+{
+  "apps": {
+    "nycu.winlab.vrouter": {
+      "vrouter": {
+        "frr0-connect-point": "of:0000000000000001/2",
+        "frr0-mac": "00:00:00:00:xx:01",
+        "frr0-ip4": "172.16.xx.69",
+        "frr0-ip6": "2a0b:4e07:c4:xx::69",
+        "virtual-gateway-ip4": "172.16.xx.1",
+        "virtual-gateway-ip6": "2a0b:4e07:c4:xx::1",
+        "virtual-gateway-mac": "00:00:00:00:xx:02",
+        "wan-connect-point": "of:0000ceaa83f3a445/3",
+        "v4-peer": [
+          "192.168.70.xx, 192.168.70.253",
+          "192.168.70.xx, 192.168.70.yy",
+          "192.168.70.xx, 192.168.70.zz",
+          "192.168.63.1, 192.168.63.2"
+        ],
+        "v6-peer": [
+          "fd70::xx, fd70::fe",
+          "fd70::xx, fd70::yy",
+          "fd70::xx, fd70::zz",
+          "fd63::1, fd63::2"
+        ],
+        "frr1-connect-point": "of:0000000000000001/5",
+        "peer1-vxlan-cp": "of:0000000000000002/4",
+        "peer2-vxlan-cp": "of:0000000000000002/5",
+        "peer1-sdn-prefix": "172.16.yy.0/24",
+        "peer2-sdn-prefix": "172.16.zz.0/24",
+        "local-sdn-prefix": "172.16.xx.0/24",
+        "peer1-sdn-prefix6": "2a0b:4e07:c4:yy::/64",
+        "peer2-sdn-prefix6": "2a0b:4e07:c4:zz::/64",
+        "local-sdn-prefix6": "2a0b:4e07:c4:xx::/64",
+        "local-traditional-prefix": "172.17.xx.0/24",
+        "local-traditional-prefix6": "2a0b:4e07:c4:1xx::/64"
+      }
+    }
+  },
+  "ports": {
+    "of:0000ceaa83f3a445/3": {
+      "interfaces": [
+        {
+          "name": "wan",
+          "ips": [
+            "192.168.70.xx/24",
+            "fd70::xx/64",
+            "fe80::846:72ff:fefc:603c/64"
+          ]
+        }
+      ]
+    },
+    "of:0000000000000001/5": {
+      "interfaces": [
+        {
+          "name": "inter-as",
+          "ips": [
+            "192.168.63.2/24",
+            "fd63::2/64",
+            "fe80::b8a7:aeff:fee3:48af/64"
+          ]
+        }
+      ]
+    },
+    "of:0000000000000002/4": {
+      "interfaces": [
+        {
+          "name": "peer1-vxlan",
+          "ips": [
+            "172.16.yy.0/24",
+            "2a0b:4e07:c4:yy::/64",
+            "fe80::9cfe:7ff:fe0b:cb93/64"
+          ]
+        }
+      ]
+    },
+    "of:0000000000000002/5": {
+      "interfaces": [
+        {
+          "name": "peer2-vxlan",
+          "ips": [
+            "172.16.zz.0/24",
+            "2a0b:4e07:c4:zz::/64",
+            "fe80::9cfe:7ff:fe0b:cb93/64"
+          ]
+        }
+      ]
+    }
+  }
+}

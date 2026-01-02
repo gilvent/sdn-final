@@ -61,8 +61,8 @@ docker exec frr0 sysctl -w net.ipv6.conf.all.forwarding=1 > /dev/null
 docker exec frr1 sysctl -w net.ipv6.conf.all.forwarding=1 > /dev/null
 
 
-# --- 4. Connect Components to OVS Bridges (AS65350) ---
-echo "Connecting AS65350 components to OVS bridges..."
+# --- 4. Connect Components to OVS Bridges (AS65xx0) ---
+echo "Connecting AS65xx0 components to OVS bridges..."
 
 # Helper function to connect a Docker container to an OVS bridge
 connect_to_ovs() {
@@ -166,7 +166,7 @@ nsenter -t $FRR1_PID -n ip link set eth1 up
 
 # --- 7. Inter AS Connection (r1 <-> ovs1) ---
 echo "Connecting r1 (frr1) to ovs1..."
-# frr1 (r1) is a boundary router, it needs a connection to ovs1 (AS65350)
+# frr1 (r1) is a boundary router, it needs a connection to ovs1 (AS65xx0)
 connect_to_ovs frr1 ovs1
 
 echo "Setup complete. Run 'make config' to configure IPs."

@@ -9,8 +9,8 @@ dexec() {
     docker exec "$@"
 }
 
-# --- 2. AS65351 (172.17.${NETWORK_ID}.0/24) ---
-echo "Configuring AS65351 (h3 and r1/frr1)..."
+# --- 2. AS65xx1 (172.17.${NETWORK_ID}.0/24) ---
+echo "Configuring AS65xx1 (h3 and r1/frr1)..."
 # h3 (172.17.${NETWORK_ID}.2/24) - Direct veth connection
 # Interface name is eth0 (set by create.sh)
 dexec h3 ip addr add 172.17.${NETWORK_ID}.2/24 dev eth0
@@ -21,8 +21,8 @@ dexec h3 ip route replace default via 172.17.${NETWORK_ID}.1
 # Interface name is eth1 (set by create.sh)
 dexec frr1 ip addr add 172.17.${NETWORK_ID}.1/24 dev eth1
 
-# --- 3. AS65350 (172.16.${NETWORK_ID}.0/24 and 192.168.100.0/24) ---
-echo "Configuring AS65350 (h1, h2, ctl, r0/frr0)..."
+# --- 3. AS65xx0 (172.16.${NETWORK_ID}.0/24 and 192.168.100.0/24) ---
+echo "Configuring AS65xx0 (h1, h2, ctl, r0/frr0)..."
 
 # Interfaces connected to ovs1 are typically eth0, and ovs2 is eth0 for h1
 # NOTE: The connect_to_ovs function renames the interface inside the container to eth0
@@ -58,7 +58,7 @@ dexec frr0 ip link set ${R0_IF_OVS1} address 00:00:00:00:${NETWORK_ID}:01
 
 
 # --- 4. Inter-AS Link (r1 <-> ovs1) ---
-echo "Configuring Inter-AS link (r1/frr1 on AS65350 side)..."
+echo "Configuring Inter-AS link (r1/frr1 on AS65xx0 side)..."
 # R1_IF_OVS1 is the interface connected to ovs1.
 # connect_to_ovs ensures this is named 'eth0'.
 R1_IF_OVS1=eth0
