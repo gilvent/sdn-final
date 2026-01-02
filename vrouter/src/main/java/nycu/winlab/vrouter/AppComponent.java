@@ -894,6 +894,24 @@ public class AppComponent {
         return cp;
     }
 
+    /**
+     * Find ConnectPoint for a MAC address by searching all devices in bridgeTable.
+     *
+     * @param mac the MAC address to look up
+     * @return ConnectPoint if found, null otherwise
+     */
+    private ConnectPoint findConnectPointInBridgeTable(MacAddress mac) {
+        for (Map.Entry<DeviceId, Map<MacAddress, PortNumber>> entry : bridgeTable.entrySet()) {
+            DeviceId deviceId = entry.getKey();
+            Map<MacAddress, PortNumber> macTable = entry.getValue();
+            PortNumber outPort = macTable.get(mac);
+            if (outPort != null) {
+                return new ConnectPoint(deviceId, outPort);
+            }
+        }
+        return null;
+    }
+
     private void handleARP(PacketContext context, Ethernet eth) {
         ConnectPoint srcPoint = context.inPacket().receivedFrom();
 
@@ -1242,13 +1260,6 @@ public class AppComponent {
      * These are packets from AS65351 (via frr0) destined to local hosts with:
      * - dstMAC = frr0 MAC
      * - dstIP = local host IP (in 172.16.35.0/24, but not frr0's IP)
-     *
-     * Virtual gateway performs L3 routing:
-     * 1. Lookup destination MAC in ARP table
-     * 2. If MAC found: rewrite src MAC to virtualGatewayMac, dst MAC to host MAC,
-     * forward
-     * 3. If MAC not found: send ARP request to discover host
-     * 4. Install per-host flow rule for subsequent packets
      */
     private void gatewayToLocalHost(PacketContext context, Ethernet eth) {
         IPv4 ipv4 = (IPv4) eth.getPayload();
@@ -1261,46 +1272,40 @@ public class AppComponent {
 
         MacAddress dstMac = ipToMacTable.asJavaMap().get(dstIp);
 
-        if (dstMac != null) {
-            log.info("[Gateway] MAC found for {}: {}. Routing packet.", dstIp, dstMac);
-
-            ConnectPoint outPoint = findHostEdgePoint(dstMac);
-
-            // TODO check if this is useful
-            if (outPoint == null) {
-                // Try bridge table - ONLY search the ingress device (where frr0 is connected)
-                // Local hosts should be reachable from the same device
-                Map<MacAddress, PortNumber> macTable = bridgeTable.get(ingressDevice);
-                if (macTable != null) {
-                    PortNumber outPort = macTable.get(dstMac);
-                    if (outPort != null) {
-                        outPoint = new ConnectPoint(ingressDevice, outPort);
-                    }
-                }
-            }
-
-            if (outPoint != null) {
-                // Rewrite MAC addresses and forward
-                Ethernet routedPkt = eth.duplicate();
-                routedPkt.setSourceMACAddress(virtualGatewayMac);
-                routedPkt.setDestinationMACAddress(dstMac);
-
-                log.info("[Gateway] Routing to local host {} via port {}/{}",
-                        dstIp, outPoint.deviceId(), outPoint.port());
-
-                packetOut(outPoint, routedPkt);
-
-                // Install per-host flow rule for subsequent packets
-                installFrr0ToLocalHostFlowRule(context, dstIp, dstMac, outPoint);
-            } else {
-                log.warn("[Gateway] Cannot find output port for MAC {}. Dropping packet.", dstMac);
-            }
-        } else {
-            // MAC not found - send ARP request to discover host
+        if (dstMac == null) {
             log.info("[Gateway] MAC not found for {}. Sending ARP request.", dstIp);
             sendArpRequest(dstIp);
-            // Packet is dropped - sender will retransmit after ARP completes
+            return;
         }
+
+        log.info("[Gateway] MAC found for {} -> {}. Looking for out point.", dstIp, dstMac);
+
+        ConnectPoint outPoint = findHostEdgePoint(dstMac);
+
+        if (outPoint == null) {
+            // Try bridge table - search all devices
+            outPoint = findConnectPointInBridgeTable(dstMac);
+        }
+
+        if (outPoint == null) {
+            log.warn("[Gateway] Cannot find output port for MAC {}. Trigger ARP Request.", dstMac);
+            sendArpRequest(dstIp);
+            return;
+        }
+
+        // Rewrite MAC addresses and forward
+        Ethernet routedPkt = eth.duplicate();
+        routedPkt.setSourceMACAddress(virtualGatewayMac);
+        routedPkt.setDestinationMACAddress(dstMac);
+
+        log.info("[Gateway] Routing to local host {} via port {}/{}",
+                dstIp, outPoint.deviceId(), outPoint.port());
+
+        packetOut(outPoint, routedPkt);
+
+        // Install per-host flow rule for subsequent packets
+        installFrr0ToLocalHostFlowRule(context, dstIp, dstMac, outPoint);
+
     }
 
     /**
@@ -1327,23 +1332,13 @@ public class AppComponent {
             return;
         }
 
-        log.info("[Gateway] MAC found for {}: {}. Routing packet.", dstIp, dstMac);
+        log.info("[Gateway] MAC found for {}: {}. Searching out point.", dstIp, dstMac);
 
         ConnectPoint outPoint = findHostEdgePoint(dstMac);
 
-        // TODO check if this is useful
-        // if (outPoint == null) {
-        // // Try bridge table - ONLY search the ingress device (where frr0 is
-        // connected)
-        // // Local hosts should be reachable from the same device
-        // Map<MacAddress, PortNumber> macTable = bridgeTable.get(ingressDevice);
-        // if (macTable != null) {
-        // PortNumber outPort = macTable.get(dstMac);
-        // if (outPort != null) {
-        // outPoint = new ConnectPoint(ingressDevice, outPort);
-        // }
-        // }
-        // }
+        if (outPoint == null) {
+            outPoint = findConnectPointInBridgeTable(dstMac);
+        }
 
         if (outPoint == null) {
             log.warn("[Gateway] Cannot find output port for MAC {}. Trigger NDP Solicitation.", dstMac);
