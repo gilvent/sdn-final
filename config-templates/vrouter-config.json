@@ -32,7 +32,9 @@
         "peer2-sdn-prefix6": "2a0b:4e07:c4:zz::/64",
         "local-sdn-prefix6": "2a0b:4e07:c4:xx::/64",
         "local-traditional-prefix": "172.17.xx.0/24",
-        "local-traditional-prefix6": "2a0b:4e07:c4:1xx::/64"
+        "local-traditional-prefix6": "2a0b:4e07:c4:1xx::/64",
+        "peer1-traditional-prefix": "172.17.yy.0/24",
+        "peer2-traditional-prefix": "172.17.zz.0/24"
       }
     }
   },
@@ -42,9 +44,9 @@
         {
           "name": "wan",
           "ips": [
-            "192.168.70.xx/24",
-            "fd70::xx/64",
-            "fe80::846:72ff:fefc:603c/64"
+            "192.168.70.253/24",
+            "fd70::fe/64",
+            "fe80::b8a7:aeff:fee3:48af/64"
           ]
         }
       ]
@@ -66,8 +68,8 @@
         {
           "name": "peer1-vxlan",
           "ips": [
-            "172.16.yy.0/24",
-            "2a0b:4e07:c4:yy::/64",
+            "192.168.70.yy/24",
+            "fd70::yy/64",
             "fe80::9cfe:7ff:fe0b:cb93/64"
           ]
         }
@@ -78,8 +80,8 @@
         {
           "name": "peer2-vxlan",
           "ips": [
-            "172.16.zz.0/24",
-            "2a0b:4e07:c4:zz::/64",
+            "192.168.70.zz/24",
+            "fd70::zz/64",
             "fe80::9cfe:7ff:fe0b:cb93/64"
           ]
         }

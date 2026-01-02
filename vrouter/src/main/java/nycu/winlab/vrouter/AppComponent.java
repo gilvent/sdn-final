@@ -55,6 +55,7 @@ import org.onosproject.net.packet.PacketContext;
 import org.onosproject.net.packet.PacketPriority;
 import org.onosproject.net.packet.PacketProcessor;
 import org.onosproject.net.edge.EdgePortService;
+import org.onosproject.net.intf.Interface;
 import org.onosproject.net.intf.InterfaceService;
 import org.onosproject.net.intent.Intent;
 import org.onosproject.net.intent.IntentService;
@@ -182,6 +183,8 @@ public class AppComponent {
     private IpPrefix localSdnPrefix6;
     private IpPrefix localTraditionalPrefix;
     private IpPrefix localTraditionalPrefix6;
+    private IpPrefix peer1TraditionalPrefix;
+    private IpPrefix peer2TraditionalPrefix;
 
     private ConsistentMap<Ip4Address, MacAddress> ipToMacTable;
     private ConsistentMap<Ip6Address, MacAddress> ip6ToMacTable;
@@ -394,6 +397,11 @@ public class AppComponent {
             localTraditionalPrefix6 = config.localTraditionalPrefix6();
             log.info("Loaded local traditional prefix: {}, IPv6: {}", localTraditionalPrefix, localTraditionalPrefix6);
 
+            // Load peer traditional prefixes
+            peer1TraditionalPrefix = config.peer1TraditionalPrefix();
+            peer2TraditionalPrefix = config.peer2TraditionalPrefix();
+            log.info("Loaded peer traditional prefixes: peer1={}, peer2={}", peer1TraditionalPrefix, peer2TraditionalPrefix);
+
             installVirtualGatewayInterceptRule();
         }
     }
@@ -528,10 +536,10 @@ public class AppComponent {
                 Ip4Address dstIp = Ip4Address.valueOf(ipv4.getDestinationAddress());
                 Ip4Address srcIp = Ip4Address.valueOf(ipv4.getSourceAddress());
 
-                // Security check for peer VXLAN
                 if (isPeerVxlanPort(srcPoint)) {
                     if (localSdnPrefix == null || !localSdnPrefix.contains(dstIp)) {
-                        log.warn("[Peer VXLAN] Blocked IPv4: src {} -> dst {} (not in local SDN)", srcIp, dstIp);
+                        // log.warn("[Peer VXLAN] Blocked IPv4: src {} -> dst {} (not in local SDN)",
+                        // srcIp, dstIp);
                         return;
                     }
                     log.info("[Peer VXLAN] Allowed IPv4: src {} -> dst {}", srcIp, dstIp);
@@ -584,6 +592,7 @@ public class AppComponent {
                     handleL3RoutingIPv4(context, eth);
                     return;
                 }
+
                 forwardByLearningBridge(context, eth);
                 return;
             }
@@ -592,13 +601,11 @@ public class AppComponent {
                 ConnectPoint srcPoint = context.inPacket().receivedFrom();
                 IPv6 ipv6 = (IPv6) eth.getPayload();
 
-                // Security check for peer VXLAN (only allow traffic to local SDN prefix)
                 if (isPeerVxlanPort(srcPoint)) {
                     Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
                     Ip6Address srcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
-
+                    // Block if destination not in local SDN prefix
                     if (localSdnPrefix6 == null || !localSdnPrefix6.contains(dstIp)) {
-                        log.warn("[Peer VXLAN] Blocked IPv6: src {} -> dst {} (not in local SDN)", srcIp, dstIp);
                         return;
                     }
                     log.info("[Peer VXLAN] Allowed IPv6: src {} -> dst {}", srcIp, dstIp);
@@ -671,7 +678,8 @@ public class AppComponent {
 
                     // Packets to local SDN prefix -> route to local host
                     if (localSdnPrefix6 != null && localSdnPrefix6.contains(dstIpV6)) {
-                        log.info("[Gateway] Intercept Inter-AS IPv6 packet to local host (for frr0): dstMAC={}, dstIP={}",
+                        log.info(
+                                "[Gateway] Intercept Inter-AS IPv6 packet to local host (for frr0): dstMAC={}, dstIP={}",
                                 eth.getDestinationMAC(), dstIpV6);
                         gatewayToLocalHostV6(context, eth);
                         return;
@@ -884,7 +892,6 @@ public class AppComponent {
 
         // Block ALL ARP from peer VXLAN ports (L3 routing - no ARP needed across VXLAN)
         if (isPeerVxlanPort(srcPoint)) {
-            log.debug("Blocked ARP from peer VXLAN port {}", srcPoint);
             return;
         }
 
@@ -1101,7 +1108,6 @@ public class AppComponent {
 
         // Block ALL NDP from peer VXLAN ports (L3 routing - no NDP needed across VXLAN)
         if (isPeerVxlanPort(srcPoint)) {
-            log.debug("Blocked NDP from peer VXLAN port {}", srcPoint);
             return;
         }
 
@@ -1353,30 +1359,6 @@ public class AppComponent {
         }
     }
 
-    /**
-     * Route IPv4 packet to peer VXLAN port.
-     * Uses RouteService to find next-hop and lookup MAC from ipToMacTable.
-     */
-    private void routeToPeerVxlan(PacketContext context, Ethernet eth, MacAddress peerFrr0Mac, ConnectPoint peerCp) {
-        Ip4Address srcIp = Ip4Address.valueOf(((IPv4) eth.getPayload()).getSourceAddress());
-        Ip4Address dstIp = Ip4Address.valueOf(((IPv4) eth.getPayload()).getDestinationAddress());
-
-        if (peerFrr0Mac == null) {
-            log.warn("[Peer VXLAN] Cannot route to {}: no MAC for next-hop", dstIp);
-            return;
-        }
-
-        // Rewrite MACs: src=virtualGateway, dst=peer's frr0 MAC
-        Ethernet routedPkt = eth.duplicate();
-        routedPkt.setSourceMACAddress(virtualGatewayMac);
-        routedPkt.setDestinationMACAddress(peerFrr0Mac);
-
-        log.info("[Peer VXLAN] Forwarding: {} -> {} via {} (dstMAC: {})",
-                srcIp, dstIp, peerCp, peerFrr0Mac);
-
-        // Send packet out to peer VXLAN port
-        packetOut(peerCp, routedPkt);
-    }
 
     /**
      * Route IPv6 packet to peer VXLAN port.
@@ -1384,7 +1366,7 @@ public class AppComponent {
      * Note: IPv6 will be updated in a future iteration.
      */
     private void routeToPeerVxlanV6(PacketContext context, Ethernet eth,
-             MacAddress peerFrr0Mac, ConnectPoint peerCp) {
+            MacAddress peerFrr0Mac, ConnectPoint peerCp) {
         Ip6Address srcIp = Ip6Address.valueOf(((IPv6) eth.getPayload()).getSourceAddress());
         Ip6Address dstIp = Ip6Address.valueOf(((IPv6) eth.getPayload()).getDestinationAddress());
 
@@ -1413,12 +1395,8 @@ public class AppComponent {
         IPv4 ipv4 = (IPv4) eth.getPayload();
         Ip4Address dstIp = Ip4Address.valueOf(ipv4.getDestinationAddress());
         Ip4Address srcIp = Ip4Address.valueOf(ipv4.getSourceAddress());
-        // MacAddress srcMac = eth.getSourceMAC();
 
         log.info("[Gateway] L3 Routing IPv4: {} -> {}", srcIp, dstIp);
-
-        // // Learn the source IP-MAC mapping
-        // ipToMacTable.put(srcIp, srcMac);
 
         // Query RouteService using longest prefix match
         Optional<ResolvedRoute> routeOpt = routeService.longestPrefixLookup(dstIp);
@@ -1438,31 +1416,21 @@ public class AppComponent {
                 log.warn("[Gateway] L3 IPv4: MAC for next-hop {} not found.", nextHop);
             }
         } else {
-            log.info("[Gateway] L3 IPv4 RouteService MISS: IP {}. Falling back to local table/default route.", dstIp);
-            dstMac = ipToMacTable.asJavaMap().get(dstIp);
+            log.info("[Gateway] L3 IPv4 RouteService MISS: IP {}.", dstIp);
+            // TODO Remove if not used
+            // dstMac = ipToMacTable.asJavaMap().get(dstIp);
         }
 
         if (dstMac != null) {
-            // Check if destination is peer SDN network -> route to peer VXLAN
-            ConnectPoint peerVxlanCp = getPeerVxlanForDestination(dstIp);
-            if (peerVxlanCp != null) {
-                routeToPeerVxlan(context, eth, dstMac, peerVxlanCp);
-                return;
-            }
-
-            // We found a MAC, either for the final destination or the next-hop router
             log.info("[Gateway] L3 IPv4 LOCAL/NEXT-HOP: Found MAC {}. Routing packet.", dstMac);
-            routePacket(context, eth, dstMac);
+            routePacket(context, eth, nextHop, dstMac);
         } else if (frr0Mac != null) {
-            // Default route: forward to the pre-configured Quagga/FRR router
             log.info("[Gateway] L3 IPv4 REMOTE: IP {} not in table. Forwarding to default frr0 router (MAC={})", dstIp,
                     frr0Mac);
-            routePacket(context, eth, frr0Mac);
+            routePacket(context, eth, nextHop, frr0Mac);
         } else {
-            // No route and no default, flood as a last resort
-            log.warn("[Gateway] L3 IPv4: Cannot route to {}. No route, no MAC, and no default router configured.",
+            log.warn("[Gateway] L3 IPv4: Cannot route to {}. Dropping the packet.",
                     dstIp);
-            flood(context);
         }
     }
 
@@ -1527,12 +1495,12 @@ public class AppComponent {
 
             // We found a MAC, either for the final destination or the next-hop router
             log.info("[Gateway] L3 IPv6 LOCAL/NEXT-HOP: Found MAC {}. Routing packet.", dstMac);
-            routePacket(context, eth, dstMac);
+            routePacketV6(context, eth, dstMac);
         } else if (frr0Mac != null) {
             // Default route: forward to the pre-configured Quagga/FRR router
             log.info("[Gateway] L3 IPv6 REMOTE: IP {} not in table. Forwarding to default frr0 router (MAC={})", dstIp,
                     frr0Mac);
-            routePacket(context, eth, frr0Mac);
+            routePacketV6(context, eth, frr0Mac);
         } else {
             // No route and no default, flood as a last resort
             log.warn("[Gateway] L3 IPv6: Cannot route to {}. No route, no MAC, and no default router configured.",
@@ -1545,7 +1513,57 @@ public class AppComponent {
      * Route a packet by rewriting MAC addresses and sending to the destination.
      * Source MAC becomes virtualGatewayMac, destination MAC becomes the target MAC.
      */
-    private void routePacket(PacketContext context, Ethernet eth, MacAddress dstMac) {
+    private void routePacket(PacketContext context, Ethernet eth, IpAddress nextHopIp, MacAddress dstMac) {
+        ConnectPoint outPoint = null;
+
+        if (nextHopIp == null) {
+            log.info("L3 Routing: No nextHop. Drop.",
+                    dstMac, dstMac);
+            return;
+        }
+
+        if (eth.getEtherType() != Ethernet.TYPE_IPV4) {
+            return;
+        }
+
+        IPv4 ipv4 = (IPv4) eth.getPayload();
+        Ip4Address dstIp = Ip4Address.valueOf(ipv4.getDestinationAddress());
+
+        // Check if destination is in peer traditional networks (route via WAN)
+        boolean isPeerTraditional = (peer1TraditionalPrefix != null && peer1TraditionalPrefix.contains(dstIp)) ||
+                                    (peer2TraditionalPrefix != null && peer2TraditionalPrefix.contains(dstIp));
+
+        if (isPeerTraditional) {
+            outPoint = externalPort;
+            log.info("L3 Routing: To WAN interface for peer traditional dstIP {} -> {}",
+                    dstIp, outPoint);
+        } else {
+            Interface matchingIntf = interfaceService.getMatchingInterface(nextHopIp);
+            if (matchingIntf != null) {
+                outPoint = matchingIntf.connectPoint();
+                log.info("L3 Routing: Found interface {} for nextHop {} -> {}",
+                        dstMac, nextHopIp, outPoint);
+            }
+        }
+
+        // Create a new Ethernet frame with rewritten MACs
+        Ethernet routedPkt = eth.duplicate();
+        routedPkt.setSourceMACAddress(virtualGatewayMac);
+        routedPkt.setDestinationMACAddress(dstMac);
+
+        if (outPoint == null) {
+            log.warn("L3 Routing: Cannot find out interface for nextHop {}. Drop packet.", nextHopIp);
+            return;
+        }
+
+        log.info("L3 Routing: Sending packet to {} via port {}/{}", dstMac, outPoint.deviceId(), outPoint.port());
+
+        packetOut(outPoint, routedPkt);
+
+        installL3FlowRule(context, eth, dstMac, outPoint.port(), outPoint);
+    }
+
+    private void routePacketV6(PacketContext context, Ethernet eth, MacAddress dstMac) {
         // Find the output port for this MAC using HostService or bridgeTable
         ConnectPoint outPoint = findHostEdgePoint(dstMac);
 
@@ -1633,16 +1651,33 @@ public class AppComponent {
         MacAddress dstMac = ethPkt.getDestinationMAC();
 
         // Receive packet-in from new device, create new table for it
-        log.info("[Learning Bridge] Received a packet-in from device `{}/{}`.", recDevId.toString(),
+        log.info("[Learning Bridge] Packet-in from device `{}/{}`.", recDevId.toString(),
                 recPort.toString());
+        log.info("[Learning Bridge] Source MAC: `{}`, Destination MAC: `{}`.", srcMac.toString(),
+                dstMac.toString());
+
+        String dstIp = ethPkt.getPayload() instanceof IPv4
+                ? Ip4Address.valueOf(((IPv4) ethPkt.getPayload()).getDestinationAddress()).toString()
+                : ethPkt.getPayload() instanceof IPv6
+                        ? Ip6Address.valueOf(((IPv6) ethPkt.getPayload()).getDestinationAddress()).toString()
+                        : "N/A";
+        String srcIp = ethPkt.getPayload() instanceof IPv4
+                ? Ip4Address.valueOf(((IPv4) ethPkt.getPayload()).getSourceAddress()).toString()
+                : ethPkt.getPayload() instanceof IPv6
+                        ? Ip6Address.valueOf(((IPv6) ethPkt.getPayload()).getSourceAddress()).toString()
+                        : "N/A";
+
+        log.info("[Learning Bridge] DST IP: `{}`, SRC IP: `{}`.", dstIp, srcIp);
+
         if (bridgeTable.get(recDevId) == null) {
             bridgeTable.put(recDevId, new HashMap<>());
         }
 
         // Learn source MAC address
         if (bridgeTable.get(recDevId).get(srcMac) == null) {
-            log.info("[Learning Bridge] Add an entry to the port table of `{}`. MAC address: `{}` => Port: `{}`.",
-                    recDevId.toString(), srcMac.toString(), recPort.toString());
+            // log.info("[Learning Bridge] New entry to device `{}`. MAC: `{}` => Port:
+            // `{}`.",
+            // recDevId.toString(), srcMac.toString(), recPort.toString());
 
             bridgeTable.get(recDevId).put(srcMac, recPort);
         }
@@ -1650,15 +1685,17 @@ public class AppComponent {
         // Forward based on destination MAC
         if (bridgeTable.get(recDevId).get(dstMac) == null) {
             // MAC address not found, flood the packet
-            log.info("[Learning Bridge] MAC address `{}` is missed on `{}/{}`. Flood the packet.", dstMac.toString(),
-                    recDevId.toString(), recPort.toString());
+            // log.info("[Learning Bridge] MAC address `{}` MISS on `{}/{}`. Flood the
+            // packet.", dstMac.toString(),
+            // recDevId.toString(), recPort.toString());
             flood(context);
 
         } else {
             // MAC address found, install flow rule
-            log.info("[Learning Bridge] MAC address `{}` is matched on `{}/{}`. Install a flow rule.",
-                    dstMac.toString(),
-                    recDevId.toString(), recPort.toString());
+            // log.info("[Learning Bridge] MAC address `{}` MATCH on `{}/{}`. Install a flow
+            // rule.",
+            // dstMac.toString(),
+            // recDevId.toString(), recPort.toString());
             installL2Rule(context, bridgeTable.get(recDevId).get(dstMac));
         }
     }
@@ -2015,7 +2052,8 @@ public class AppComponent {
                     deviceId, frr0Mac, localSdnPrefix6);
         }
 
-        // IPv6 intercept rule for traditional network: dstMAC = frr0 MAC, dstIP in local traditional IPv6 subnet
+        // IPv6 intercept rule for traditional network: dstMAC = frr0 MAC, dstIP in
+        // local traditional IPv6 subnet
         if (localTraditionalPrefix6 != null) {
             TrafficSelector selectorV6Trad = DefaultTrafficSelector.builder()
                     .matchEthType(Ethernet.TYPE_IPV6)
@@ -2033,7 +2071,8 @@ public class AppComponent {
                     .build();
 
             flowRuleService.applyFlowRules(flowRuleV6Trad);
-            log.info("Installed virtual gateway IPv6 intercept rule for traditional network on device {} for dstMAC={}, dstIP={}",
+            log.info(
+                    "Installed virtual gateway IPv6 intercept rule for traditional network on device {} for dstMAC={}, dstIP={}",
                     deviceId, frr0Mac, localTraditionalPrefix6);
         }
     }

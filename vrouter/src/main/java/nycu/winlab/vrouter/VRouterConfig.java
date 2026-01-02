@@ -52,6 +52,8 @@ public class VRouterConfig extends Config<ApplicationId> {
     private static final String LOCAL_SDN_PREFIX6 = "local-sdn-prefix6";
     private static final String LOCAL_TRADITIONAL_PREFIX = "local-traditional-prefix";
     private static final String LOCAL_TRADITIONAL_PREFIX6 = "local-traditional-prefix6";
+    private static final String PEER1_TRADITIONAL_PREFIX = "peer1-traditional-prefix";
+    private static final String PEER2_TRADITIONAL_PREFIX = "peer2-traditional-prefix";
 
     @Override
     public boolean isValid() {
@@ -60,7 +62,8 @@ public class VRouterConfig extends Config<ApplicationId> {
                 VIRTUAL_GATEWAY_MAC, WAN_CONNECT_POINT, V4_PEER, V6_PEER,
                 PEER1_VXLAN_CP, PEER2_VXLAN_CP, PEER1_SDN_PREFIX, PEER2_SDN_PREFIX, LOCAL_SDN_PREFIX,
                 PEER1_SDN_PREFIX6, PEER2_SDN_PREFIX6, LOCAL_SDN_PREFIX6,
-                LOCAL_TRADITIONAL_PREFIX, LOCAL_TRADITIONAL_PREFIX6);
+                LOCAL_TRADITIONAL_PREFIX, LOCAL_TRADITIONAL_PREFIX6,
+                PEER1_TRADITIONAL_PREFIX, PEER2_TRADITIONAL_PREFIX);
     }
 
     /**
@@ -250,6 +253,26 @@ public class VRouterConfig extends Config<ApplicationId> {
      */
     public IpPrefix localTraditionalPrefix6() {
         String prefix = get(LOCAL_TRADITIONAL_PREFIX6, null);
+        return prefix != null ? IpPrefix.valueOf(prefix) : null;
+    }
+
+    /**
+     * Gets the peer 1 traditional network prefix (e.g., 172.17.34.0/24).
+     *
+     * @return IpPrefix or null if not configured
+     */
+    public IpPrefix peer1TraditionalPrefix() {
+        String prefix = get(PEER1_TRADITIONAL_PREFIX, null);
+        return prefix != null ? IpPrefix.valueOf(prefix) : null;
+    }
+
+    /**
+     * Gets the peer 2 traditional network prefix (e.g., 172.17.36.0/24).
+     *
+     * @return IpPrefix or null if not configured
+     */
+    public IpPrefix peer2TraditionalPrefix() {
+        String prefix = get(PEER2_TRADITIONAL_PREFIX, null);
         return prefix != null ? IpPrefix.valueOf(prefix) : null;
     }
 
