@@ -34,7 +34,9 @@
         "local-traditional-prefix": "172.17.xx.0/24",
         "local-traditional-prefix6": "2a0b:4e07:c4:1xx::/64",
         "peer1-traditional-prefix": "172.17.yy.0/24",
-        "peer2-traditional-prefix": "172.17.zz.0/24"
+        "peer2-traditional-prefix": "172.17.zz.0/24",
+        "peer1-traditional-prefix6": "2a0b:4e07:c4:1yy::/64",
+        "peer2-traditional-prefix6": "2a0b:4e07:c4:1zz::/64"
       }
     }
   },

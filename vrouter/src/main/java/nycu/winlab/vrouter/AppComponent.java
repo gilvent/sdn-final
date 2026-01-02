@@ -185,6 +185,8 @@ public class AppComponent {
     private IpPrefix localTraditionalPrefix6;
     private IpPrefix peer1TraditionalPrefix;
     private IpPrefix peer2TraditionalPrefix;
+    private IpPrefix peer1TraditionalPrefix6;
+    private IpPrefix peer2TraditionalPrefix6;
 
     private ConsistentMap<Ip4Address, MacAddress> ipToMacTable;
     private ConsistentMap<Ip6Address, MacAddress> ip6ToMacTable;
@@ -313,12 +315,12 @@ public class AppComponent {
 
             // // Pre-populate frr0 IP-MAC mappings for L3 routing
             // if (frr0Ip4 != null && frr0Mac != null && ipToMacTable != null) {
-            //     ipToMacTable.put(frr0Ip4, frr0Mac);
-            //     log.info("Pre-populated frr0 IPv4 mapping: {} -> {}", frr0Ip4, frr0Mac);
+            // ipToMacTable.put(frr0Ip4, frr0Mac);
+            // log.info("Pre-populated frr0 IPv4 mapping: {} -> {}", frr0Ip4, frr0Mac);
             // }
             // if (frr0Ip6 != null && frr0Mac != null && ip6ToMacTable != null) {
-            //     ip6ToMacTable.put(frr0Ip6, frr0Mac);
-            //     log.info("Pre-populated frr0 IPv6 mapping: {} -> {}", frr0Ip6, frr0Mac);
+            // ip6ToMacTable.put(frr0Ip6, frr0Mac);
+            // log.info("Pre-populated frr0 IPv6 mapping: {} -> {}", frr0Ip6, frr0Mac);
             // }
 
             // Pre-populate WAN local IP -> frr0 MAC mapping
@@ -400,7 +402,12 @@ public class AppComponent {
             // Load peer traditional prefixes
             peer1TraditionalPrefix = config.peer1TraditionalPrefix();
             peer2TraditionalPrefix = config.peer2TraditionalPrefix();
-            log.info("Loaded peer traditional prefixes: peer1={}, peer2={}", peer1TraditionalPrefix, peer2TraditionalPrefix);
+            peer1TraditionalPrefix6 = config.peer1TraditionalPrefix6();
+            peer2TraditionalPrefix6 = config.peer2TraditionalPrefix6();
+            log.info("Loaded peer traditional prefixes: peer1={}, peer2={}", peer1TraditionalPrefix,
+                    peer2TraditionalPrefix);
+            log.info("Loaded peer traditional IPv6 prefixes: peer1={}, peer2={}", peer1TraditionalPrefix6,
+                    peer2TraditionalPrefix6);
 
             installVirtualGatewayInterceptRule();
         }
@@ -554,7 +561,7 @@ public class AppComponent {
                         }
                         return;
                     }
-                    
+
                     if (localTraditionalPrefix != null && localTraditionalPrefix.contains(dstIp)) {
                         log.info("[WAN] Allowing traffic to traditional network: dstIp={}", dstIp);
                         // Fall through to L3 routing
@@ -700,7 +707,7 @@ public class AppComponent {
                     return;
                 }
 
-                forwardByLearningBridge(context, eth);
+                // forwardByLearningBridge(context, eth);
                 return;
             }
         }
@@ -1301,13 +1308,6 @@ public class AppComponent {
      * These are packets from AS65351 (via frr0) destined to local hosts with:
      * - dstMAC = frr0 MAC
      * - dstIP = local host IPv6 (in local SDN prefix, but not frr0's IP)
-     *
-     * Virtual gateway performs L3 routing:
-     * 1. Lookup destination MAC in NDP table
-     * 2. If MAC found: rewrite src MAC to virtualGatewayMac, dst MAC to host MAC,
-     * forward
-     * 3. If MAC not found: send NDP solicitation to discover host
-     * 4. Install per-host flow rule for subsequent packets
      */
     private void gatewayToLocalHostV6(PacketContext context, Ethernet eth) {
         IPv6 ipv6 = (IPv6) eth.getPayload();
@@ -1320,45 +1320,49 @@ public class AppComponent {
 
         MacAddress dstMac = ip6ToMacTable.asJavaMap().get(dstIp);
 
-        if (dstMac != null) {
-            log.info("[Gateway] MAC found for {}: {}. Routing packet.", dstIp, dstMac);
-
-            ConnectPoint outPoint = findHostEdgePoint(dstMac);
-
-            if (outPoint == null) {
-                // Try bridge table - ONLY search the ingress device (where frr0 is connected)
-                // Local hosts should be reachable from the same device
-                Map<MacAddress, PortNumber> macTable = bridgeTable.get(ingressDevice);
-                if (macTable != null) {
-                    PortNumber outPort = macTable.get(dstMac);
-                    if (outPort != null) {
-                        outPoint = new ConnectPoint(ingressDevice, outPort);
-                    }
-                }
-            }
-
-            if (outPoint != null) {
-                Ethernet routedPkt = eth.duplicate();
-                routedPkt.setSourceMACAddress(virtualGatewayMac);
-                routedPkt.setDestinationMACAddress(dstMac);
-
-                log.info("[Gateway] Routing IPv6 to local host {} via port {}/{}",
-                        dstIp, outPoint.deviceId(), outPoint.port());
-
-                packetOut(outPoint, routedPkt);
-
-                installFrr0ToLocalHostFlowRuleV6(context, dstIp, dstMac, outPoint);
-            } else {
-                log.warn("[Gateway] Cannot find output port for MAC {}. Dropping packet.", dstMac);
-            }
-        } else {
+        if (dstMac == null) {
             // MAC not found - send NDP solicitation to discover host
             log.info("[Gateway] MAC not found for {}. Sending NDP solicitation.", dstIp);
             sendNdpSolicitation(dstIp);
-            // Packet is dropped - sender will retransmit after NDP completes
+            return;
         }
-    }
 
+        log.info("[Gateway] MAC found for {}: {}. Routing packet.", dstIp, dstMac);
+
+        ConnectPoint outPoint = findHostEdgePoint(dstMac);
+
+        // TODO check if this is useful
+        // if (outPoint == null) {
+        // // Try bridge table - ONLY search the ingress device (where frr0 is
+        // connected)
+        // // Local hosts should be reachable from the same device
+        // Map<MacAddress, PortNumber> macTable = bridgeTable.get(ingressDevice);
+        // if (macTable != null) {
+        // PortNumber outPort = macTable.get(dstMac);
+        // if (outPort != null) {
+        // outPoint = new ConnectPoint(ingressDevice, outPort);
+        // }
+        // }
+        // }
+
+        if (outPoint == null) {
+            log.warn("[Gateway] Cannot find output port for MAC {}. Trigger NDP Solicitation.", dstMac);
+            sendNdpSolicitation(dstIp);
+            return;
+        }
+
+        Ethernet routedPkt = eth.duplicate();
+        routedPkt.setSourceMACAddress(virtualGatewayMac);
+        routedPkt.setDestinationMACAddress(dstMac);
+
+        log.info("[Gateway] Routing IPv6 to local host {} via port {}/{}",
+                dstIp, outPoint.deviceId(), outPoint.port());
+
+        packetOut(outPoint, routedPkt);
+
+        installFrr0ToLocalHostFlowRuleV6(context, dstIp, dstMac, outPoint);
+
+    }
 
     /**
      * Route IPv6 packet to peer VXLAN port.
@@ -1495,12 +1499,12 @@ public class AppComponent {
 
             // We found a MAC, either for the final destination or the next-hop router
             log.info("[Gateway] L3 IPv6 LOCAL/NEXT-HOP: Found MAC {}. Routing packet.", dstMac);
-            routePacketV6(context, eth, dstMac);
+            routePacketV6(context, eth, nextHop, dstMac);
         } else if (frr0Mac != null) {
             // Default route: forward to the pre-configured Quagga/FRR router
             log.info("[Gateway] L3 IPv6 REMOTE: IP {} not in table. Forwarding to default frr0 router (MAC={})", dstIp,
                     frr0Mac);
-            routePacketV6(context, eth, frr0Mac);
+            routePacketV6(context, eth, frr0Ip6, frr0Mac);
         } else {
             // No route and no default, flood as a last resort
             log.warn("[Gateway] L3 IPv6: Cannot route to {}. No route, no MAC, and no default router configured.",
@@ -1531,7 +1535,7 @@ public class AppComponent {
 
         // Check if destination is in peer traditional networks (route via WAN)
         boolean isPeerTraditional = (peer1TraditionalPrefix != null && peer1TraditionalPrefix.contains(dstIp)) ||
-                                    (peer2TraditionalPrefix != null && peer2TraditionalPrefix.contains(dstIp));
+                (peer2TraditionalPrefix != null && peer2TraditionalPrefix.contains(dstIp));
 
         if (isPeerTraditional) {
             outPoint = externalPort;
@@ -1563,20 +1567,36 @@ public class AppComponent {
         installL3FlowRule(context, eth, dstMac, outPoint.port(), outPoint);
     }
 
-    private void routePacketV6(PacketContext context, Ethernet eth, MacAddress dstMac) {
-        // Find the output port for this MAC using HostService or bridgeTable
-        ConnectPoint outPoint = findHostEdgePoint(dstMac);
+    private void routePacketV6(PacketContext context, Ethernet eth, IpAddress nextHopIp, MacAddress dstMac) {
+        ConnectPoint outPoint = null;
 
-        if (outPoint == null) {
-            // Try bridge table - search ALL devices, not just source device
-            for (Map.Entry<DeviceId, Map<MacAddress, PortNumber>> entry : bridgeTable.entrySet()) {
-                DeviceId deviceId = entry.getKey();
-                Map<MacAddress, PortNumber> macTable = entry.getValue();
-                PortNumber outPort = macTable.get(dstMac);
-                if (outPort != null) {
-                    outPoint = new ConnectPoint(deviceId, outPort);
-                    break;
-                }
+        if (nextHopIp == null) {
+            log.info("L3 Routing IPv6: No nextHop. Drop.");
+            return;
+        }
+
+        if (eth.getEtherType() != Ethernet.TYPE_IPV6) {
+            return;
+        }
+
+        IPv6 ipv6 = (IPv6) eth.getPayload();
+        Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
+
+        // Check if destination is in peer traditional networks (route via WAN)
+        boolean isPeerTraditional = (peer1TraditionalPrefix6 != null && peer1TraditionalPrefix6.contains(dstIp)) ||
+                (peer2TraditionalPrefix6 != null && peer2TraditionalPrefix6.contains(dstIp));
+
+        if (isPeerTraditional) {
+            outPoint = externalPort;
+            log.info("L3 Routing IPv6: To WAN interface for peer traditional dstIP {} -> {}",
+                    dstIp, outPoint);
+        } else {
+            // Use interfaceService to find output port based on next-hop IP
+            Interface matchingIntf = interfaceService.getMatchingInterface(nextHopIp);
+            if (matchingIntf != null) {
+                outPoint = matchingIntf.connectPoint();
+                log.info("L3 Routing IPv6: Found interface {} for nextHop {} -> {}",
+                        matchingIntf.name(), nextHopIp, outPoint);
             }
         }
 
@@ -1586,15 +1606,12 @@ public class AppComponent {
         routedPkt.setDestinationMACAddress(dstMac);
 
         if (outPoint == null) {
-            // MAC not found in any table, flood the rewritten packet
-            log.warn("L3 Routing: Cannot find output port for MAC {}. Flooding rewritten packet.", dstMac);
-            floodPacket(context, routedPkt);
+            log.warn("L3 Routing IPv6: Cannot find interface for nextHop {}. Drop packet.", nextHopIp);
             return;
         }
 
-        log.info("L3 Routing: Sending packet to {} via port {}/{}", dstMac, outPoint.deviceId(), outPoint.port());
+        log.info("L3 Routing IPv6: Sending packet to {} via port {}/{}", dstMac, outPoint.deviceId(), outPoint.port());
 
-        // Send the packet out
         packetOut(outPoint, routedPkt);
 
         installL3FlowRule(context, eth, dstMac, outPoint.port(), outPoint);

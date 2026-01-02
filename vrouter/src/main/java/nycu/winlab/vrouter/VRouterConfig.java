@@ -54,6 +54,8 @@ public class VRouterConfig extends Config<ApplicationId> {
     private static final String LOCAL_TRADITIONAL_PREFIX6 = "local-traditional-prefix6";
     private static final String PEER1_TRADITIONAL_PREFIX = "peer1-traditional-prefix";
     private static final String PEER2_TRADITIONAL_PREFIX = "peer2-traditional-prefix";
+    private static final String PEER1_TRADITIONAL_PREFIX6 = "peer1-traditional-prefix6";
+    private static final String PEER2_TRADITIONAL_PREFIX6 = "peer2-traditional-prefix6";
 
     @Override
     public boolean isValid() {
@@ -63,7 +65,8 @@ public class VRouterConfig extends Config<ApplicationId> {
                 PEER1_VXLAN_CP, PEER2_VXLAN_CP, PEER1_SDN_PREFIX, PEER2_SDN_PREFIX, LOCAL_SDN_PREFIX,
                 PEER1_SDN_PREFIX6, PEER2_SDN_PREFIX6, LOCAL_SDN_PREFIX6,
                 LOCAL_TRADITIONAL_PREFIX, LOCAL_TRADITIONAL_PREFIX6,
-                PEER1_TRADITIONAL_PREFIX, PEER2_TRADITIONAL_PREFIX);
+                PEER1_TRADITIONAL_PREFIX, PEER2_TRADITIONAL_PREFIX,
+                PEER1_TRADITIONAL_PREFIX6, PEER2_TRADITIONAL_PREFIX6);
     }
 
     /**
@@ -273,6 +276,26 @@ public class VRouterConfig extends Config<ApplicationId> {
      */
     public IpPrefix peer2TraditionalPrefix() {
         String prefix = get(PEER2_TRADITIONAL_PREFIX, null);
+        return prefix != null ? IpPrefix.valueOf(prefix) : null;
+    }
+
+    /**
+     * Gets the peer 1 traditional IPv6 network prefix (e.g., 2a0b:4e07:c4:134::/64).
+     *
+     * @return IpPrefix or null if not configured
+     */
+    public IpPrefix peer1TraditionalPrefix6() {
+        String prefix = get(PEER1_TRADITIONAL_PREFIX6, null);
+        return prefix != null ? IpPrefix.valueOf(prefix) : null;
+    }
+
+    /**
+     * Gets the peer 2 traditional IPv6 network prefix (e.g., 2a0b:4e07:c4:136::/64).
+     *
+     * @return IpPrefix or null if not configured
+     */
+    public IpPrefix peer2TraditionalPrefix6() {
+        String prefix = get(PEER2_TRADITIONAL_PREFIX6, null);
         return prefix != null ? IpPrefix.valueOf(prefix) : null;
     }
 
