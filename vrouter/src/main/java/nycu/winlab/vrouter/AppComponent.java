@@ -586,11 +586,20 @@ public class AppComponent {
                 // Check for intercepted packets: dstMAC = frr0 MAC, dstIP in local subnet (but
                 // not frr0's IP)
                 if (frr0Mac != null && eth.getDestinationMAC().equals(frr0Mac) &&
-                        localSdnPrefix != null && localSdnPrefix.contains(dstIp) &&
+                        
                         frr0Ip4 != null && !dstIp.equals(frr0Ip4)) {
-                    log.info("[Gateway] Intercept Inter-AS packet to local host (for frr0): dstMAC={}, dstIP={}",
+                    
+                    
+                    if (localSdnPrefix != null && localSdnPrefix.contains(dstIp)) {
+                        log.info("[Gateway] Intercept Inter-AS packet to local: dstMAC={}, dstIP={}",
                             eth.getDestinationMAC(), dstIp);
-                    gatewayToLocalHost(context, eth);
+                        gatewayToLocalHost(context, eth);
+                    } else {
+                        log.info("[Gateway] Intercept Inter-AS traffic IPv4: dstMAC={}, dstIP={}",
+                                eth.getDestinationMAC(), dstIp);
+                        handleL3RoutingIPv4(context, eth);
+                    }
+
                     return;
                 }
 
