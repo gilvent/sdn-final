@@ -456,36 +456,6 @@ public class AppComponent {
     }
 
     /**
-     * Get the peer VXLAN connect point for a destination IP.
-     */
-    private ConnectPoint getPeerVxlanForDestination(Ip4Address dstIp) {
-        if (peer1SdnPrefix != null && peer1VxlanCp != null &&
-                peer1SdnPrefix.contains(IpAddress.valueOf(dstIp.toString()))) {
-            return peer1VxlanCp;
-        }
-        if (peer2SdnPrefix != null && peer2VxlanCp != null &&
-                peer2SdnPrefix.contains(IpAddress.valueOf(dstIp.toString()))) {
-            return peer2VxlanCp;
-        }
-        return null;
-    }
-
-    /**
-     * Get the peer VXLAN connect point for an IPv6 destination.
-     */
-    private ConnectPoint getPeerVxlanForDestinationV6(Ip6Address dstIp) {
-        if (peer1SdnPrefix6 != null && peer1VxlanCp != null &&
-                peer1SdnPrefix6.contains(IpAddress.valueOf(dstIp.toString()))) {
-            return peer1VxlanCp;
-        }
-        if (peer2SdnPrefix6 != null && peer2VxlanCp != null &&
-                peer2SdnPrefix6.contains(IpAddress.valueOf(dstIp.toString()))) {
-            return peer2VxlanCp;
-        }
-        return null;
-    }
-
-    /**
      * Extract MAC address from IPv6 link-local address using EUI-64 format.
      *
      * EUI-64 embeds MAC in the interface identifier (last 64 bits) with:
@@ -637,12 +607,12 @@ public class AppComponent {
                 if (externalPort != null && srcPoint.equals(externalPort)) {
                     Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
 
-                    // Allow NDP (handled by handleWanNDP via handleNDP)
+                    // Handle NDP packets from WAN port separately
                     if (ipv6.getNextHeader() == IPv6.PROTOCOL_ICMP6) {
                         ICMP6 icmp6 = (ICMP6) ipv6.getPayload();
                         byte type = icmp6.getIcmpType();
                         if (type == ICMP6.NEIGHBOR_SOLICITATION || type == ICMP6.NEIGHBOR_ADVERTISEMENT) {
-                            handleNDP(context, eth);
+                            handleWanNDP(context, eth);
                             return;
                         }
                     }
@@ -1080,7 +1050,6 @@ public class AppComponent {
 
         // Verify this is an ICMP6 packet
         if (ipv6.getNextHeader() != IPv6.PROTOCOL_ICMP6) {
-            log.debug("Dropping non-ICMP6 IPv6 from WAN port");
             return;
         }
 
@@ -1089,7 +1058,6 @@ public class AppComponent {
 
         // Only handle NDP packets (NS and NA)
         if (type != ICMP6.NEIGHBOR_SOLICITATION && type != ICMP6.NEIGHBOR_ADVERTISEMENT) {
-            log.debug("Dropping non-NDP ICMP6 from WAN port: type={}", type);
             return;
         }
 
@@ -1150,15 +1118,12 @@ public class AppComponent {
             return;
         }
 
-        // Handle NDP packets from WAN port separately
-        if (externalPort != null && srcPoint.equals(externalPort)) {
-            handleWanNDP(context, eth);
-            return;
-        }
-
         MacAddress srcMac = eth.getSourceMAC();
         IPv6 ipv6 = (IPv6) eth.getPayload();
         Ip6Address srcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
+
+        log.info("[NDP] Packet received from {}: srcIp={}, dstIp={}",
+                srcPoint, srcIp, Ip6Address.valueOf(ipv6.getDestinationAddress()));
 
         // Check if this is a DAD (Duplicate Address Detection) packet
         // DAD packets have source IP = :: (unspecified address)
@@ -1477,52 +1442,40 @@ public class AppComponent {
                     dstIp, route.prefix(), nextHop);
         }
 
+        if (nextHop == null) {
+            log.info("[Gateway] L3 IPv6 RouteService MISS: IP {}. Drop the packet.", dstIp);
+            return;
+        }
+
         // Determine the destination MAC based on the next hop
         MacAddress dstMac = null;
-        if (nextHop != null) {
-            Ip6Address nextHopIp6 = nextHop.getIp6Address();
+        Ip6Address nextHopIp6 = nextHop.getIp6Address();
 
+        // Handle link-local next-hops (fe80::) - derive MAC from EUI-64
+        if (nextHopIp6.isLinkLocal()) {
+            dstMac = macFromLinkLocal(nextHopIp6);
+            log.info("[Gateway] L3 IPv6: Next-hop {} is link-local. Derived MAC: {}",
+                    nextHopIp6, dstMac);
+        } else {
             dstMac = ip6ToMacTable.asJavaMap().get(nextHopIp6);
-            if (dstMac == null) {
-                log.warn("[Gateway] L3 IPv6: MAC for next-hop {} not found.", nextHop);
-            }
-
-            // Handle link-local next-hops (fe80::) - derive MAC from EUI-64 and route
-            // directly
-            if (nextHopIp6.isLinkLocal()) {
-                dstMac = macFromLinkLocal(nextHopIp6);
-                log.info("[Gateway] L3 IPv6: Next-hop {} is link-local. Derived MAC: {}",
-                        nextHopIp6, dstMac);
-            }
-
-        } else {
-            // Fallback to original logic if RouteService has no entry
-            log.info("[Gateway] L3 IPv6 RouteService MISS: IP {}. Falling back to local table/default route.", dstIp);
-            dstMac = ip6ToMacTable.asJavaMap().get(dstIp);
         }
 
-        if (dstMac != null) {
-            // Check if destination is peer SDN network -> route to peer VXLAN
-            ConnectPoint peerVxlanCp = getPeerVxlanForDestinationV6(dstIp);
-            if (peerVxlanCp != null) {
-                routeToPeerVxlanV6(context, eth, dstMac, peerVxlanCp);
-                return;
-            }
-
-            // We found a MAC, either for the final destination or the next-hop router
-            log.info("[Gateway] L3 IPv6 LOCAL/NEXT-HOP: Found MAC {}. Routing packet.", dstMac);
-            routePacketV6(context, eth, nextHop, dstMac);
-        } else if (frr0Mac != null) {
-            // Default route: forward to the pre-configured Quagga/FRR router
-            log.info("[Gateway] L3 IPv6 REMOTE: IP {} not in table. Forwarding to default frr0 router (MAC={})", dstIp,
+        if (dstMac == null) {
+            log.info("[Gateway] L3 IPv6: Next-hop MAC not found. Forward to default frr0 router (MAC={})",
                     frr0Mac);
-            routePacketV6(context, eth, frr0Ip6, frr0Mac);
-        } else {
-            // No route and no default, flood as a last resort
-            log.warn("[Gateway] L3 IPv6: Cannot route to {}. No route, no MAC, and no default router configured.",
-                    dstIp);
-            flood(context);
+            routePacketV6(context, eth, frr0Mac, frr0ConnectPoint);
+            return;
         }
+
+        log.info("[Gateway] L3 IPv6: Found NEXT-HOP MAC {}.", dstMac);
+        ConnectPoint outPoint = findIp6NextHopOutput(eth, nextHopIp6);
+
+        if (outPoint == null) {
+            log.warn("[Gateway] L3 IPv6: Cannot find output interfacce for nextHop {}. Drop packet.", nextHopIp6);
+            return;
+        }
+
+        routePacketV6(context, eth, dstMac, outPoint);
     }
 
     /**
@@ -1579,22 +1532,12 @@ public class AppComponent {
         installL3FlowRule(context, eth, dstMac, outPoint.port(), outPoint);
     }
 
-    private void routePacketV6(PacketContext context, Ethernet eth, IpAddress nextHopIp, MacAddress dstMac) {
+    private ConnectPoint findIp6NextHopOutput(Ethernet eth, IpAddress nextHopIp6) {
         ConnectPoint outPoint = null;
-
-        if (nextHopIp == null) {
-            log.info("L3 Routing IPv6: No nextHop. Drop.");
-            return;
-        }
-
-        if (eth.getEtherType() != Ethernet.TYPE_IPV6) {
-            return;
-        }
 
         IPv6 ipv6 = (IPv6) eth.getPayload();
         Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
 
-        // Check if destination is in peer traditional networks (route via WAN)
         boolean isPeerTraditional = (peer1TraditionalPrefix6 != null && peer1TraditionalPrefix6.contains(dstIp)) ||
                 (peer2TraditionalPrefix6 != null && peer2TraditionalPrefix6.contains(dstIp));
 
@@ -1604,23 +1547,26 @@ public class AppComponent {
                     dstIp, outPoint);
         } else {
             // Use interfaceService to find output port based on next-hop IP
-            Interface matchingIntf = interfaceService.getMatchingInterface(nextHopIp);
+            Interface matchingIntf = interfaceService.getMatchingInterface(nextHopIp6);
             if (matchingIntf != null) {
                 outPoint = matchingIntf.connectPoint();
-                log.info("L3 Routing IPv6: Found interface {} for nextHop {} -> {}",
-                        matchingIntf.name(), nextHopIp, outPoint);
+                log.info("L3 Routing IPv6: Found interface '{}' for nextHop {} -> {}",
+                        matchingIntf.name(), nextHopIp6, outPoint);
             }
+        }
+
+        return outPoint;
+    }
+
+    private void routePacketV6(PacketContext context, Ethernet eth, MacAddress dstMac, ConnectPoint outPoint) {
+        if (eth.getEtherType() != Ethernet.TYPE_IPV6) {
+            return;
         }
 
         // Create a new Ethernet frame with rewritten MACs
         Ethernet routedPkt = eth.duplicate();
         routedPkt.setSourceMACAddress(virtualGatewayMac);
         routedPkt.setDestinationMACAddress(dstMac);
-
-        if (outPoint == null) {
-            log.warn("L3 Routing IPv6: Cannot find interface for nextHop {}. Drop packet.", nextHopIp);
-            return;
-        }
 
         log.info("L3 Routing IPv6: Sending packet to {} via port {}/{}", dstMac, outPoint.deviceId(), outPoint.port());
 
@@ -1851,7 +1797,7 @@ public class AppComponent {
         TpPort fpmPort = TpPort.tpPort(2620);
         DeviceId ovs1Id = frr0ConnectPoint.deviceId();
         PortNumber onosPort = ConnectPoint.deviceConnectPoint("of:0000000000000001/3").port();
-        
+
         TrafficSelector fpmSelector = DefaultTrafficSelector.builder()
                 .matchEthType(Ethernet.TYPE_IPV4)
                 .matchIPSrc(frrIp4)
