@@ -1228,7 +1228,7 @@ public class AppComponent {
                     if (cp.equals(srcPoint)) {
                         continue;
                     }
-                    log.info("NDP Solicitation to edge {}", cp);
+                    // log.info("NDP Solicitation to edge {}", cp);
                     packetOut(cp, eth);
                 }
             }
@@ -1342,33 +1342,6 @@ public class AppComponent {
     }
 
     /**
-     * Route IPv6 packet to peer VXLAN port.
-     * Uses RouteService to find next-hop and lookup MAC from ip6ToMacTable.
-     * Note: IPv6 will be updated in a future iteration.
-     */
-    private void routeToPeerVxlanV6(PacketContext context, Ethernet eth,
-            MacAddress peerFrr0Mac, ConnectPoint peerCp) {
-        Ip6Address srcIp = Ip6Address.valueOf(((IPv6) eth.getPayload()).getSourceAddress());
-        Ip6Address dstIp = Ip6Address.valueOf(((IPv6) eth.getPayload()).getDestinationAddress());
-
-        if (peerFrr0Mac == null) {
-            log.warn("[Peer VXLAN IPv6] Cannot route to {}: no MAC for next-hop", dstIp);
-            return;
-        }
-
-        // Rewrite MACs: src=virtualGateway, dst=peer's frr0 MAC
-        Ethernet routedPkt = eth.duplicate();
-        routedPkt.setSourceMACAddress(virtualGatewayMac);
-        routedPkt.setDestinationMACAddress(peerFrr0Mac);
-
-        log.info("[Peer VXLAN IPv6] Forwarding: {} -> {} via {} (dstMAC: {})",
-                srcIp, dstIp, peerCp, peerFrr0Mac);
-
-        // Send packet out to peer VXLAN port
-        packetOut(peerCp, routedPkt);
-    }
-
-    /**
      * Handle L3 routing for IPv4 packets destined to the virtual gateway.
      * Rewrites MAC addresses and forwards to the appropriate destination.
      */
@@ -1379,7 +1352,6 @@ public class AppComponent {
 
         log.info("[Gateway] L3 Routing IPv4: {} -> {}", srcIp, dstIp);
 
-        // Query RouteService using longest prefix match
         Optional<ResolvedRoute> routeOpt = routeService.longestPrefixLookup(dstIp);
         IpAddress nextHop = null;
         if (routeOpt.isPresent()) {
@@ -1389,30 +1361,29 @@ public class AppComponent {
                     dstIp, route.prefix(), nextHop);
         }
 
-        // Determine the destination MAC based on the next hop
-        MacAddress dstMac = null;
-        if (nextHop != null) {
-            dstMac = ipToMacTable.asJavaMap().get(nextHop.getIp4Address());
-            if (dstMac == null) {
-                log.warn("[Gateway] L3 IPv4: MAC for next-hop {} not found.", nextHop);
-            }
-        } else {
-            log.info("[Gateway] L3 IPv4 RouteService MISS: IP {}.", dstIp);
-            // TODO Remove if not used
-            // dstMac = ipToMacTable.asJavaMap().get(dstIp);
+        if (nextHop == null) {
+            log.info("[Gateway] L3 IPv4 RouteService MISS: IP {}. Drop the packet.", dstIp);
+            return;
         }
 
-        if (dstMac != null) {
-            log.info("[Gateway] L3 IPv4 LOCAL/NEXT-HOP: Found MAC {}. Routing packet.", dstMac);
-            routePacket(context, eth, nextHop, dstMac);
-        } else if (frr0Mac != null) {
-            log.info("[Gateway] L3 IPv4 REMOTE: IP {} not in table. Forwarding to default frr0 router (MAC={})", dstIp,
-                    frr0Mac);
-            routePacket(context, eth, nextHop, frr0Mac);
-        } else {
-            log.warn("[Gateway] L3 IPv4: Cannot route to {}. Dropping the packet.",
-                    dstIp);
+        // Determine the destination MAC based on the next hop
+        MacAddress dstMac = ipToMacTable.asJavaMap().get(nextHop.getIp4Address());
+
+        if (dstMac == null) {
+            log.warn("[Gateway] L3 IPv4: MAC for next-hop {} not found. Forwarding to default frr0 router (MAC={})",
+                    nextHop);
+            routePacket(context, eth, frr0Mac, frr0ConnectPoint);
+            return;
         }
+
+        log.info("[Gateway] L3 IPv4: NEXT-HOP: Found MAC {}. Routing packet.", dstMac);
+        ConnectPoint outPoint = findNextHopOutPoint(eth, nextHop);
+        if (outPoint == null) {
+            log.warn("L3 Routing: Cannot find out interface for nextHop {}. Drop packet.", nextHop);
+            return;
+        }
+        
+        routePacket(context, eth, dstMac, outPoint);
     }
 
     /**
@@ -1478,22 +1449,8 @@ public class AppComponent {
         routePacketV6(context, eth, dstMac, outPoint);
     }
 
-    /**
-     * Route a packet by rewriting MAC addresses and sending to the destination.
-     * Source MAC becomes virtualGatewayMac, destination MAC becomes the target MAC.
-     */
-    private void routePacket(PacketContext context, Ethernet eth, IpAddress nextHopIp, MacAddress dstMac) {
+    private ConnectPoint findNextHopOutPoint(Ethernet eth, IpAddress nextHopIp) {
         ConnectPoint outPoint = null;
-
-        if (nextHopIp == null) {
-            log.info("L3 Routing: No nextHop. Drop.",
-                    dstMac, dstMac);
-            return;
-        }
-
-        if (eth.getEtherType() != Ethernet.TYPE_IPV4) {
-            return;
-        }
 
         IPv4 ipv4 = (IPv4) eth.getPayload();
         Ip4Address dstIp = Ip4Address.valueOf(ipv4.getDestinationAddress());
@@ -1510,20 +1467,27 @@ public class AppComponent {
             Interface matchingIntf = interfaceService.getMatchingInterface(nextHopIp);
             if (matchingIntf != null) {
                 outPoint = matchingIntf.connectPoint();
-                log.info("L3 Routing: Found interface {} for nextHop {} -> {}",
-                        dstMac, nextHopIp, outPoint);
+                log.info("L3 Routing: Found interface for nextHop {} -> {}", nextHopIp, outPoint);
             }
+        }
+
+        return outPoint;
+    }
+
+    /**
+     * Route a packet by rewriting MAC addresses and sending to the destination.
+     * Source MAC becomes virtualGatewayMac, destination MAC becomes the target MAC.
+     */
+    private void routePacket(PacketContext context, Ethernet eth, MacAddress dstMac, ConnectPoint outPoint) {
+
+        if (eth.getEtherType() != Ethernet.TYPE_IPV4) {
+            return;
         }
 
         // Create a new Ethernet frame with rewritten MACs
         Ethernet routedPkt = eth.duplicate();
         routedPkt.setSourceMACAddress(virtualGatewayMac);
         routedPkt.setDestinationMACAddress(dstMac);
-
-        if (outPoint == null) {
-            log.warn("L3 Routing: Cannot find out interface for nextHop {}. Drop packet.", nextHopIp);
-            return;
-        }
 
         log.info("L3 Routing: Sending packet to {} via port {}/{}", dstMac, outPoint.deviceId(), outPoint.port());
 
