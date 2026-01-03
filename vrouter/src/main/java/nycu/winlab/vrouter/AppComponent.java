@@ -20,6 +20,7 @@ import org.onlab.packet.Ethernet;
 import org.onlab.packet.Ip4Address;
 import org.onlab.packet.IPv4;
 import org.onlab.packet.MacAddress;
+import org.onlab.packet.TpPort;
 import org.onlab.packet.VlanId;
 import org.onlab.packet.IPv6;
 import org.onlab.packet.ICMP6;
@@ -46,7 +47,9 @@ import org.onosproject.net.flow.FlowRule;
 import org.onosproject.net.flow.FlowRuleService;
 import org.onosproject.net.flow.TrafficSelector;
 import org.onosproject.net.flow.TrafficTreatment;
+import org.onosproject.net.flowobjective.DefaultForwardingObjective;
 import org.onosproject.net.flowobjective.FlowObjectiveService;
+import org.onosproject.net.flowobjective.ForwardingObjective;
 import org.onosproject.net.host.HostService;
 import org.onosproject.net.packet.DefaultOutboundPacket;
 import org.onosproject.net.packet.InboundPacket;
@@ -368,6 +371,8 @@ public class AppComponent {
                     log.info("Pre-populated internal IPv6 mapping: {} -> {}", localIp, frr0Mac);
                 }
             }
+
+            installFrrToFpmFlowRules();
 
             installWanForwardingIntents();
 
@@ -1834,6 +1839,63 @@ public class AppComponent {
             log.info("WAN IPv6 peering configured: local={}, peers={}", wanLocalIp6, wanPeerIp6List);
             log.info("WAN IPv6 traffic will be handled by packet processor (no intents)");
         }
+    }
+
+    private void installFrrToFpmFlowRules() {
+        // frr -> onos fpm (port 2620) flow rule
+        IpPrefix onosIp4 = IpPrefix.valueOf("192.168.100.2/32");
+        IpPrefix frrIp4 = IpPrefix.valueOf("192.168.100.3/32");
+        TpPort fpmPort = TpPort.tpPort(2620);
+        DeviceId ovs1Id = frr0ConnectPoint.deviceId();
+        PortNumber onosPort = ConnectPoint.deviceConnectPoint("of:0000000000000001/3").port();
+        
+        TrafficSelector fpmSelector = DefaultTrafficSelector.builder()
+                .matchEthType(Ethernet.TYPE_IPV4)
+                .matchIPSrc(frrIp4)
+                .matchIPDst(onosIp4)
+                .matchIPProtocol(IPv4.PROTOCOL_TCP)
+                .matchTcpDst(fpmPort)
+                .build();
+
+        // Output should be the "onos-port" (data plane) and not controller
+        TrafficTreatment treatment = DefaultTrafficTreatment.builder()
+                .setOutput(onosPort)
+                .build();
+
+        ForwardingObjective frrToFpmFwd = DefaultForwardingObjective.builder()
+                .withSelector(fpmSelector)
+                .withTreatment(treatment)
+                .withPriority(50000) // High priority
+                .withFlag(ForwardingObjective.Flag.VERSATILE)
+                .fromApp(appId)
+                .makePermanent()
+                .add();
+
+        flowObjectiveService.forward(ovs1Id, frrToFpmFwd);
+
+        // Onos -> frr flow rule
+
+        TrafficSelector reverseSelector = DefaultTrafficSelector.builder()
+                .matchEthType(Ethernet.TYPE_IPV4)
+                .matchIPSrc(onosIp4)
+                .matchIPDst(frrIp4)
+                .matchIPProtocol(IPv4.PROTOCOL_TCP)
+                .build();
+
+        TrafficTreatment outputFrrTreatment = DefaultTrafficTreatment.builder()
+                .setOutput(frr0ConnectPoint.port())
+                .build();
+
+        ForwardingObjective onosToFrrFwd = DefaultForwardingObjective.builder()
+                .withSelector(reverseSelector)
+                .withTreatment(outputFrrTreatment)
+                .withPriority(50000)
+                .withFlag(ForwardingObjective.Flag.VERSATILE)
+                .fromApp(appId)
+                .makePermanent()
+                .add();
+
+        flowObjectiveService.forward(frr0ConnectPoint.deviceId(), onosToFrrFwd);
     }
 
     /**
