@@ -721,7 +721,7 @@ public class AppComponent {
                     return;
                 }
 
-                // forwardByLearningBridge(context, eth);
+                forwardByLearningBridge(context, eth);
                 return;
             }
         }
@@ -1186,22 +1186,25 @@ public class AppComponent {
         byte type = icmp6.getIcmpType();
 
         if (type == ICMP6.NEIGHBOR_ADVERTISEMENT) {
-            // Deserialize with custom class to avoid ClassCastException
-            // (ONOS returns built-in NeighborAdvertisement, not our custom class)
-            try {
-                byte[] naBytes = icmp6.getPayload().serialize();
-                NeighborAdvertisement2 na = NeighborAdvertisement2.deserializer()
-                        .deserialize(naBytes, 0, naBytes.length);
-                byte[] targetBytes = na.getTargetAddress();
-                Ip6Address targetIp = Ip6Address.valueOf(targetBytes);
-                MacAddress cachedDstMac = ip6ToMacTable.asJavaMap().get(targetIp);
-                ConnectPoint dstHostPoint = findHostEdgePoint(cachedDstMac);
+            // Forward NA to the requester (destination of the NA, not the target)
+            // NA: srcIP=advertiser, dstIP=requester, targetIP=advertised address
+            Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
+            MacAddress dstMac = eth.getDestinationMAC();
 
-                if (dstHostPoint != null) {
-                    packetOut(dstHostPoint, eth);
-                }
-            } catch (Exception e) {
-                log.warn("Failed to deserialize Neighbor Advertisement: {}", e.getMessage());
+            // Find requester's location using Ethernet destination MAC
+            ConnectPoint dstHostPoint = findHostEdgePoint(dstMac);
+            if (dstHostPoint == null) {
+                // Try bridge table
+                dstHostPoint = findConnectPointInBridgeTable(dstMac);
+            }
+
+            log.info("[NDP Advertisement] srcIP={}, dstIP={}, dstMAC={}", srcIp, dstIp, dstMac);
+
+            if (dstHostPoint != null) {
+                log.info("Forwarding NDP Advertisement to requester at {}", dstHostPoint);
+                packetOut(dstHostPoint, eth);
+            } else {
+                log.warn("Cannot find requester location for NDP Advertisement: dstMAC={}", dstMac);
             }
 
             return;
@@ -1244,7 +1247,7 @@ public class AppComponent {
             MacAddress cachedDstMac = ip6ToMacTable.asJavaMap().get(targetIp);
 
             if (cachedDstMac != null) {
-                // log.info("NDP TABLE HIT. Requested MAC = {}", cachedDstMac);
+                log.info("NDP TABLE HIT. Requested MAC = {}", cachedDstMac);
 
                 Ethernet ndpAdv = NeighborAdvertisement2.buildNdpAdv(targetIp, cachedDstMac,
                         context.inPacket().parsed());
@@ -1252,7 +1255,7 @@ public class AppComponent {
 
                 packetOut(outCp, ndpAdv);
             } else {
-                // log.info("NDP TABLE MISS. Send NDP Solicitation to edge ports");
+                log.info("NDP TABLE MISS for target {}.  NDP Solicitation to edge ports", targetIp);
 
                 Iterable<ConnectPoint> edgePoints = edgePortService.getEdgePoints();
 
@@ -1260,7 +1263,7 @@ public class AppComponent {
                     if (cp.equals(srcPoint)) {
                         continue;
                     }
-
+                    log.info("NDP Solicitation to edge {}", cp);
                     packetOut(cp, eth);
                 }
             }
