@@ -191,6 +191,7 @@ public class AppComponent {
     private IpPrefix peer1TraditionalPrefix6;
     private IpPrefix peer2TraditionalPrefix6;
     private List<String[]> v4Peers;
+    private List<String[]> v6Peers;
 
     private ConsistentMap<Ip4Address, MacAddress> ipToMacTable;
     private ConsistentMap<Ip6Address, MacAddress> ip6ToMacTable;
@@ -327,29 +328,33 @@ public class AppComponent {
             }
 
             // Parse v6-peer to get WAN IPv6 and internal peer addresses
-            List<String[]> v6Peers = config.v6Peers();
+            v6Peers = config.v6Peers();
             if (v6Peers != null && !v6Peers.isEmpty()) {
-                String[] firstPeer = v6Peers.get(0);
-                wanLocalIp6 = Ip6Address.valueOf(firstPeer[0]);
-
-                wanPeerIp6List.clear();
-                internalV6Peers.clear();
-
-                for (String[] peer : v6Peers) {
-                    Ip6Address localIp = Ip6Address.valueOf(peer[0]);
-                    Ip6Address peerIp = Ip6Address.valueOf(peer[1]);
-
-                    // Check if this is a WAN peer (same /64 as wanLocalIp6)
-                    if (isSameSubnet64(localIp, wanLocalIp6)) {
-                        wanPeerIp6List.add(peerIp);
-                        log.info("Loaded WAN IPv6 peer: local={}, peer={}", localIp, peerIp);
-                    } else {
-                        // This is an internal peer
-                        internalV6Peers.add(new Ip6Address[] { localIp, peerIp });
-                        log.info("Loaded internal IPv6 peering config: local={}, peer={}", localIp, peerIp);
-                    }
-                }
+                installV6PeersIntents();
             }
+            // if (v6Peers != null && !v6Peers.isEmpty()) {
+            // String[] firstPeer = v6Peers.get(0);
+            // wanLocalIp6 = Ip6Address.valueOf(firstPeer[0]);
+
+            // wanPeerIp6List.clear();
+            // internalV6Peers.clear();
+
+            // for (String[] peer : v6Peers) {
+            // Ip6Address localIp = Ip6Address.valueOf(peer[0]);
+            // Ip6Address peerIp = Ip6Address.valueOf(peer[1]);
+
+            // // Check if this is a WAN peer (same /64 as wanLocalIp6)
+            // if (isSameSubnet64(localIp, wanLocalIp6)) {
+            // wanPeerIp6List.add(peerIp);
+            // log.info("Loaded WAN IPv6 peer: local={}, peer={}", localIp, peerIp);
+            // } else {
+            // // This is an internal peer
+            // internalV6Peers.add(new Ip6Address[] { localIp, peerIp });
+            // log.info("Loaded internal IPv6 peering config: local={}, peer={}", localIp,
+            // peerIp);
+            // }
+            // }
+            // }
 
             // Pre-populate WAN local IPv6 -> frr0 MAC mapping
             if (wanLocalIp6 != null && frr0Mac != null && ip6ToMacTable != null) {
@@ -358,18 +363,15 @@ public class AppComponent {
             }
 
             // Pre-populate internal peer IPv6 -> frr0 MAC mapping (for frr0's internal IPs)
-            for (Ip6Address[] peerPair : internalV6Peers) {
-                Ip6Address localIp = peerPair[0];
-                if (frr0Mac != null && ip6ToMacTable != null) {
-                    ip6ToMacTable.put(localIp, frr0Mac);
-                    log.info("Pre-populated internal IPv6 mapping: {} -> {}", localIp, frr0Mac);
-                }
-            }
+            // for (Ip6Address[] peerPair : internalV6Peers) {
+            //     Ip6Address localIp = peerPair[0];
+            //     if (frr0Mac != null && ip6ToMacTable != null) {
+            //         ip6ToMacTable.put(localIp, frr0Mac);
+            //         log.info("Pre-populated internal IPv6 mapping: {} -> {}", localIp, frr0Mac);
+            //     }
+            // }
 
             installFrrToFpmFlowRules();
-
-            // Internal peer forwarding (IPv6)
-            installInternalPeerForwardingIntents();
 
             // Load peer VXLAN configuration
             peer1VxlanCp = config.peer1VxlanCp();
@@ -573,7 +575,7 @@ public class AppComponent {
                     }
                 }
 
-                forwardByLearningBridge(context, eth);
+                handleByLearningBridge(context, eth);
                 return;
             }
 
@@ -581,6 +583,7 @@ public class AppComponent {
                 ConnectPoint srcPoint = context.inPacket().receivedFrom();
                 IPv6 ipv6 = (IPv6) eth.getPayload();
 
+                // TODO: Allow only to frr0 and local SDN prefix
                 if (isPeerVxlanPort(srcPoint)) {
                     Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
                     Ip6Address srcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
@@ -589,7 +592,6 @@ public class AppComponent {
                         return;
                     }
                     log.info("[Peer VXLAN] Allowed IPv6: src {} -> dst {}", srcIp, dstIp);
-                    // Fall through to normal processing (frr0Mac intercept)
                 }
 
                 // Handle traffic FROM WAN port (inbound)
@@ -615,6 +617,7 @@ public class AppComponent {
                         return;
                     }
 
+                    // TODO: Allow to frr0 and to local traditional prefix only
                     // Allow traffic to local traditional prefix (return traffic from h3 via WAN)
                     if (localTraditionalPrefix6 != null && localTraditionalPrefix6.contains(dstIp)) {
                         log.info("[WAN] Allowing IPv6 traffic to traditional network: dstIp={}", dstIp);
@@ -626,61 +629,45 @@ public class AppComponent {
                     }
                 }
 
-                // Handle traffic TO WAN port (outbound from frr0)
-                if (!wanPeerIp6List.isEmpty() && frr0ConnectPoint != null && srcPoint.equals(frr0ConnectPoint)) {
-                    Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
-
-                    // Forward traffic destined to any WAN peer to external port
-                    for (Ip6Address peerIp : wanPeerIp6List) {
-                        if (dstIp.equals(peerIp)) {
-                            log.info("Forwarding frr0 IPv6 to WAN peer {}: {} -> {}", peerIp, frr0ConnectPoint,
-                                    externalPort);
-                            packetOut(externalPort, eth);
-                            return;
-                        }
-                    }
-                }
-
                 // Handle NDP (Neighbor Solicitation and Advertisement)
                 if (ipv6.getNextHeader() == IPv6.PROTOCOL_ICMP6) {
                     ICMP6 icmp6 = (ICMP6) ipv6.getPayload();
                     byte type = icmp6.getIcmpType();
+                    Ip6Address icmpSrcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
+                    Ip6Address icmpDstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
+
+                    log.info("[DEBUG] ICMPv6 from {}: type={}, srcIP={}, dstIP={}, srcMAC={}, dstMAC={}",
+                            srcPoint, type, icmpSrcIp, icmpDstIp, eth.getSourceMAC(), eth.getDestinationMAC());
+
                     if (type == ICMP6.NEIGHBOR_SOLICITATION || type == ICMP6.NEIGHBOR_ADVERTISEMENT) {
                         handleNDP(context, eth);
                         return;
                     }
                 }
 
-                // Check for intercepted IPv6 packets: dstMAC = frr0 MAC (but not frr0's IP)
+                // TODO: There are actually multiple ip6s for frr. Review if any flow will
+                // impact this
                 Ip6Address dstIpV6 = Ip6Address.valueOf(ipv6.getDestinationAddress());
-                if (frr0Mac != null && eth.getDestinationMAC().equals(frr0Mac) &&
-                        frr0Ip6 != null && !dstIpV6.equals(frr0Ip6)) {
-
+                if (frr0Mac != null && eth.getDestinationMAC().equals(frr0Mac)) {
                     // Packets to local SDN prefix -> route to local host
                     if (localSdnPrefix6 != null && localSdnPrefix6.contains(dstIpV6)) {
                         log.info(
-                                "[Gateway] Intercept Inter-AS IPv6 packet to local host (for frr0): dstMAC={}, dstIP={}",
+                                "[Gateway] Handle Inter-AS IPv6 packet to local subnet (for frr0): dstMAC={}, dstIP={}",
                                 eth.getDestinationMAC(), dstIpV6);
-                        gatewayToLocalHostV6(context, eth);
+                        routeToLocalSubnetV6(context, eth);
                         return;
                     }
 
                     // Packets to local traditional prefix -> route via L3 (frr0)
                     if (localTraditionalPrefix6 != null && localTraditionalPrefix6.contains(dstIpV6)) {
-                        log.info("[Gateway] Intercept Peer-to-Traditional IPv6: dstMAC={}, dstIP={}",
+                        log.info("[Gateway] Handle Inter-AS IPv6 to external network: dstMAC={}, dstIP={}",
                                 eth.getDestinationMAC(), dstIpV6);
                         handleL3RoutingIPv6(context, eth);
                         return;
                     }
                 }
 
-                // Check if this is L3 routing (destination is our virtual gateway MAC)
-                if (virtualGatewayMac != null && eth.getDestinationMAC().equals(virtualGatewayMac)) {
-                    handleL3RoutingIPv6(context, eth);
-                    return;
-                }
-
-                forwardByLearningBridge(context, eth);
+                handleByLearningBridge(context, eth);
                 return;
             }
         }
@@ -1229,7 +1216,7 @@ public class AppComponent {
     /**
      * Handle packets intercepted by virtual gateway interception rule.
      * These are packets from AS65351 (via frr0) destined to local hosts with:
-
+     * 
      * - dstIP = local host IP (in 172.16.35.0/24, but not frr0's IP)
      */
     private void routeToLocalSubnet(PacketContext context, Ethernet eth) {
@@ -1268,11 +1255,9 @@ public class AppComponent {
 
     /**
      * Handle IPv6 packets intercepted by virtual gateway interception rule.
-     * These are packets from AS65351 (via frr0) destined to local hosts with:
      * - dstMAC = frr0 MAC
-     * - dstIP = local host IPv6 (in local SDN prefix, but not frr0's IP)
      */
-    private void gatewayToLocalHostV6(PacketContext context, Ethernet eth) {
+    private void routeToLocalSubnetV6(PacketContext context, Ethernet eth) {
         IPv6 ipv6 = (IPv6) eth.getPayload();
         Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
         Ip6Address srcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
@@ -1304,17 +1289,7 @@ public class AppComponent {
             return;
         }
 
-        Ethernet routedPkt = eth.duplicate();
-        routedPkt.setSourceMACAddress(virtualGatewayMac);
-        routedPkt.setDestinationMACAddress(dstMac);
-
-        log.info("[Gateway] Routing IPv6 to local host {} via port {}/{}",
-                dstIp, outPoint.deviceId(), outPoint.port());
-
-        packetOut(outPoint, routedPkt);
-
-        installFrr0ToLocalHostFlowRuleV6(context, dstIp, dstMac, outPoint);
-
+        routePacketV6(context, eth, dstMac, outPoint);
     }
 
     /**
@@ -1512,26 +1487,19 @@ public class AppComponent {
 
         packetOut(outPoint, routedPkt);
 
-        installL3Forwarding(context, eth, dstMac, outPoint);
+        installL3ForwardingV6(context, eth, dstMac, outPoint);
     }
 
     private void installL3Forwarding(PacketContext context, Ethernet eth, MacAddress dstMac,
             ConnectPoint outPoint) {
         ConnectPoint ingressCp = context.inPacket().receivedFrom();
-        TrafficSelector.Builder selectorBuilder = DefaultTrafficSelector.builder()
-                .matchEthDst(frr0Mac);
+        IPv4 ipv4 = (IPv4) eth.getPayload();
 
-        if (eth.getEtherType() == Ethernet.TYPE_IPV4) {
-            IPv4 ipv4 = (IPv4) eth.getPayload();
-            selectorBuilder.matchEthType(Ethernet.TYPE_IPV4)
-                    .matchIPDst(IpPrefix.valueOf(
-                            Ip4Address.valueOf(ipv4.getDestinationAddress()), 32));
-        } else if (eth.getEtherType() == Ethernet.TYPE_IPV6) {
-            IPv6 ipv6 = (IPv6) eth.getPayload();
-            selectorBuilder.matchEthType(Ethernet.TYPE_IPV6)
-                    .matchIPv6Dst(IpPrefix.valueOf(
-                            Ip6Address.valueOf(ipv6.getDestinationAddress()), 128));
-        }
+        TrafficSelector.Builder selectorBuilder = DefaultTrafficSelector.builder()
+                .matchEthDst(frr0Mac)
+                .matchEthType(Ethernet.TYPE_IPV4)
+                .matchIPDst(IpPrefix.valueOf(
+                        Ip4Address.valueOf(ipv4.getDestinationAddress()), 32));
 
         TrafficTreatment treatment = DefaultTrafficTreatment.builder()
                 .setEthSrc(virtualGatewayMac)
@@ -1551,7 +1519,36 @@ public class AppComponent {
         log.info("Installed L3 forwarding from {} -> {}", ingressCp, outPoint);
     }
 
-    private void forwardByLearningBridge(PacketContext context, Ethernet ethPkt) {
+    private void installL3ForwardingV6(PacketContext context, Ethernet eth, MacAddress dstMac,
+            ConnectPoint outPoint) {
+        ConnectPoint ingressCp = context.inPacket().receivedFrom();
+        IPv6 ipv6 = (IPv6) eth.getPayload();
+
+        TrafficSelector.Builder selectorBuilder = DefaultTrafficSelector.builder()
+                .matchEthDst(frr0Mac)
+                .matchEthType(Ethernet.TYPE_IPV6)
+                .matchIPv6Dst(IpPrefix.valueOf(
+                        Ip6Address.valueOf(ipv6.getDestinationAddress()), 128));
+
+        TrafficTreatment treatment = DefaultTrafficTreatment.builder()
+                .setEthSrc(virtualGatewayMac)
+                .setEthDst(dstMac)
+                .build();
+
+        PointToPointIntent forwardingIntent = PointToPointIntent.builder()
+                .appId(appId)
+                .selector(selectorBuilder.build())
+                .treatment(treatment)
+                .filteredIngressPoint(new FilteredConnectPoint(ingressCp))
+                .filteredEgressPoint(new FilteredConnectPoint(outPoint))
+                .priority(60)
+                .build();
+
+        intentService.submit(forwardingIntent);
+        log.info("Installed L3 forwarding (IPv6) from {} -> {}", ingressCp, outPoint);
+    }
+
+    private void handleByLearningBridge(PacketContext context, Ethernet ethPkt) {
         InboundPacket pkt = context.inPacket();
 
         DeviceId recDevId = pkt.receivedFrom().deviceId();
@@ -1593,14 +1590,12 @@ public class AppComponent {
 
         // Forward based on destination MAC
         if (bridgeTable.get(recDevId).get(dstMac) == null) {
-            // MAC address not found, flood the packet
             // log.info("[Learning Bridge] MAC address `{}` MISS on `{}/{}`. Flood the
             // packet.", dstMac.toString(),
             // recDevId.toString(), recPort.toString());
             flood(context);
 
         } else {
-            // MAC address found, install flow rule
             // log.info("[Learning Bridge] MAC address `{}` MATCH on `{}/{}`. Install a flow
             // rule.",
             // dstMac.toString(),
@@ -1703,69 +1698,6 @@ public class AppComponent {
     }
 
     /**
-     * Install bidirectional PointToPointIntents for internal IPv6 peer traffic.
-     * This enables BGP communication between frr0 and frr1 on the fd63::/64
-     * network.
-     */
-    private void installInternalPeerForwardingIntents() {
-        if (internalV6Peers.isEmpty()) {
-            log.info("No internal IPv6 peers configured");
-            return;
-        }
-
-        if (frr0ConnectPoint == null || frr1ConnectPoint == null) {
-            log.warn("Cannot install internal peer intents: frr0ConnectPoint={}, frr1ConnectPoint={}",
-                    frr0ConnectPoint, frr1ConnectPoint);
-            return;
-        }
-
-        for (Ip6Address[] peerPair : internalV6Peers) {
-            Ip6Address frr0InternalIp = peerPair[0]; // fd63::1
-            Ip6Address frr1InternalIp = peerPair[1]; // fd63::2
-
-            // Intent 1: Traffic to frr0's internal IP (fd63::1)
-            TrafficSelector toFrr0Selector = DefaultTrafficSelector.builder()
-                    .matchEthType(Ethernet.TYPE_IPV6)
-                    .matchIPv6Dst(IpPrefix.valueOf(frr0InternalIp, 128))
-                    .build();
-
-            PointToPointIntent toFrr0Intent = PointToPointIntent.builder()
-                    .appId(appId)
-                    .selector(toFrr0Selector)
-                    .treatment(DefaultTrafficTreatment.builder().build())
-                    .filteredIngressPoint(new FilteredConnectPoint(frr1ConnectPoint))
-                    .filteredEgressPoint(new FilteredConnectPoint(frr0ConnectPoint))
-                    .priority(45000)
-                    .build();
-
-            intentService.submit(toFrr0Intent);
-            log.info("Installed internal peer intent: to {} via {} -> {}",
-                    frr0InternalIp, frr1ConnectPoint, frr0ConnectPoint);
-
-            // Intent 2: Traffic to frr1's internal IP (fd63::2)
-            TrafficSelector toFrr1Selector = DefaultTrafficSelector.builder()
-                    .matchEthType(Ethernet.TYPE_IPV6)
-                    .matchIPv6Dst(IpPrefix.valueOf(frr1InternalIp, 128))
-                    .build();
-
-            PointToPointIntent toFrr1Intent = PointToPointIntent.builder()
-                    .appId(appId)
-                    .selector(toFrr1Selector)
-                    .treatment(DefaultTrafficTreatment.builder().build())
-                    .filteredIngressPoint(new FilteredConnectPoint(frr0ConnectPoint))
-                    .filteredEgressPoint(new FilteredConnectPoint(frr1ConnectPoint))
-                    .priority(45000)
-                    .build();
-
-            intentService.submit(toFrr1Intent);
-            log.info("Installed internal peer intent: to {} via {} -> {}",
-                    frr1InternalIp, frr0ConnectPoint, frr1ConnectPoint);
-
-            log.info("Internal IPv6 BGP forwarding enabled: {} <-> {}", frr0InternalIp, frr1InternalIp);
-        }
-    }
-
-    /**
      * Install PointToPointIntents for IPv4 BGP peers exchange.
      * Uses interfaceService to dynamically determine connect points based on peer
      * IPs:
@@ -1852,10 +1784,97 @@ public class AppComponent {
     }
 
     /**
+     * Install PointToPointIntents for IPv4 BGP peers exchange.
+     * Uses interfaceService to dynamically determine connect points based on peer
+     * IPs:
+     * AS65xx0 <-> (AS65yy0 / AS65zz0) through peer VXLAN interface
+     * AS65xx0 <-> AS65000 through WAN interface
+     * AS65xx0 <-> AS65xx1 through frr1 interface
+     */
+    private void installV6PeersIntents() {
+        if (v6Peers == null || v6Peers.isEmpty()) {
+            log.info("No v6-peers configured for intent installation");
+            return;
+        }
+
+        if (frr0ConnectPoint == null) {
+            log.warn("Cannot install v6 peer intents: frr0ConnectPoint not configured");
+            return;
+        }
+
+        log.info("Available interfaces from InterfaceService:");
+        for (Interface intf : interfaceService.getInterfaces()) {
+            log.info("  Interface: {} at {} with IPs: {}", intf.name(), intf.connectPoint(), intf.ipAddressesList());
+        }
+        int installedCount = 0;
+        for (String[] peer : v6Peers) {
+            Ip6Address localIp = Ip6Address.valueOf(peer[0]);
+            Ip6Address peerIp = Ip6Address.valueOf(peer[1]);
+
+            // Find connect points using interfaceService
+            Interface localIntf = interfaceService.getMatchingInterface(localIp);
+            Interface peerIntf = interfaceService.getMatchingInterface(peerIp);
+
+            log.info("v6-peer lookup: local={} (intf={}), peer={} (intf={})", localIp,
+                    localIntf != null ? localIntf.name() : "null", peerIp, peerIntf != null ? peerIntf.name() : "null");
+
+            // Determine connect points - fallback to frr0ConnectPoint for local IPs
+            ConnectPoint localCp = (localIntf != null) ? localIntf.connectPoint() : frr0ConnectPoint;
+            ConnectPoint peerCp = (peerIntf != null) ? peerIntf.connectPoint() : null;
+
+            if (peerCp == null) {
+                log.warn("No interface found for peer IP {}, skipping", peerIp);
+                continue;
+            }
+
+            // Intent 1: Traffic to peer IP (local -> peer)
+            TrafficSelector toPeerSelector = DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV6)
+                    .matchIPv6Dst(IpPrefix.valueOf(peerIp, 128))
+                    .build();
+
+            PointToPointIntent toPeerIntent = PointToPointIntent.builder()
+                    .appId(appId)
+                    .selector(toPeerSelector)
+                    .treatment(DefaultTrafficTreatment.builder().build())
+                    .filteredIngressPoint(new FilteredConnectPoint(localCp))
+                    .filteredEgressPoint(new FilteredConnectPoint(peerCp))
+                    .priority(50000)
+                    .build();
+
+            intentService.submit(toPeerIntent);
+            log.info("Installed v6-peer intent: to {} via {} -> {}", peerIp, localCp, peerCp);
+
+            // Intent 2: Traffic to local IP (peer -> local)
+            TrafficSelector toLocalSelector = DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV6)
+                    .matchIPv6Dst(IpPrefix.valueOf(localIp, 128))
+                    .build();
+
+            PointToPointIntent toLocalIntent = PointToPointIntent.builder()
+                    .appId(appId)
+                    .selector(toLocalSelector)
+                    .treatment(DefaultTrafficTreatment.builder().build())
+                    .filteredIngressPoint(new FilteredConnectPoint(peerCp))
+                    .filteredEgressPoint(new FilteredConnectPoint(localCp))
+                    .priority(50000)
+                    .build();
+
+            intentService.submit(toLocalIntent);
+            log.info("Installed v6-peer intent: to {} via {} -> {}", localIp, peerCp, localCp);
+
+            installedCount++;
+        }
+
+        log.info("Installed {} bidirectional v6-peer intent pairs", installedCount);
+    }
+
+    /**
      * Install flow rule to intercept packets where:
      * - dstMAC = frr0 MAC
      * 
-     * BGP peering packets (dstIP = frr0 IPs) forwarded by flow rules and should not be intercepted.
+     * BGP peering packets (dstIP = frr0 IPs) forwarded by flow rules and should not
+     * be intercepted.
      */
     private void installVirtualGatewayInterceptRule() {
         if (frr0Mac == null) {
@@ -1907,57 +1926,4 @@ public class AppComponent {
                     deviceId, frr0Mac);
         }
     }
-
-    /**
-     * Install per-host IPv6 flow rule for packets from frr0 to local hosts.
-     * This optimizes subsequent packets by handling them in the data plane.
-     *
-     * Flow rule matches:
-     * - dstMAC = frr0 MAC
-     * - dstIP = specific local host IPv6
-     *
-     * Actions:
-     * - Rewrite srcMAC to virtualGatewayMac
-     * - Rewrite dstMAC to host MAC
-     * - Forward to host port
-     */
-    private void installFrr0ToLocalHostFlowRuleV6(PacketContext context, Ip6Address dstIp,
-            MacAddress dstMac, ConnectPoint outPoint) {
-        DeviceId deviceId = context.inPacket().receivedFrom().deviceId();
-
-        // Only install flow rule if packet came from and goes to the same device
-        if (!deviceId.equals(outPoint.deviceId())) {
-            log.debug("Not installing IPv6 flow rule: packet traverses devices {} -> {}",
-                    deviceId, outPoint.deviceId());
-            return;
-        }
-
-        // Selector: dstMAC = frr0 MAC, dstIP = specific host IPv6
-        TrafficSelector selector = DefaultTrafficSelector.builder()
-                .matchEthType(Ethernet.TYPE_IPV6)
-                .matchEthDst(frr0Mac)
-                .matchIPv6Dst(IpPrefix.valueOf(dstIp, 128))
-                .build();
-
-        // Treatment: rewrite MACs and forward to host port
-        TrafficTreatment treatment = DefaultTrafficTreatment.builder()
-                .setEthSrc(virtualGatewayMac)
-                .setEthDst(dstMac)
-                .setOutput(outPoint.port())
-                .build();
-
-        FlowRule flowRule = DefaultFlowRule.builder()
-                .forDevice(deviceId)
-                .withSelector(selector)
-                .withTreatment(treatment)
-                .withPriority(60) // Higher priority than intercept rule (50) for specific host routing
-                .fromApp(appId)
-                .makeTemporary(30) // 30-second timeout
-                .build();
-
-        flowRuleService.applyFlowRules(flowRule);
-        log.info("Installed per-host IPv6 flow rule on device {} for dstIP={} -> dstMAC={}, outPort={}",
-                deviceId, dstIp, dstMac, outPoint.port());
-    }
-
 }

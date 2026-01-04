@@ -89,13 +89,13 @@ dexec h3 ip -6 route replace default via 2a0b:4e07:c4:1${NETWORK_ID}::1
 dexec frr1 ip -6 addr add 2a0b:4e07:c4:1${NETWORK_ID}::1/64 dev eth1
 dexec frr1 ip -6 addr add fd63::2/64 dev eth0
 
-# h2 (2a0b:4e07:c4:${NETWORK_ID}::3/64) -> GW: vrouter (2a0b:4e07:c4:${NETWORK_ID}::1)
+# h2 (2a0b:4e07:c4:${NETWORK_ID}::3/64) -> GW: vrouter (2a0b:4e07:c4:${NETWORK_ID}::69)
 dexec h2 ip -6 addr add 2a0b:4e07:c4:${NETWORK_ID}::3/64 dev eth0
-dexec h2 ip -6 route replace default via 2a0b:4e07:c4:${NETWORK_ID}::1
+dexec h2 ip -6 route replace default via 2a0b:4e07:c4:${NETWORK_ID}::69
 
-# h1 (2a0b:4e07:c4:${NETWORK_ID}::2/64) -> GW: vrouter (2a0b:4e07:c4:${NETWORK_ID}::1)
+# h1 (2a0b:4e07:c4:${NETWORK_ID}::2/64) -> GW: vrouter (2a0b:4e07:c4:${NETWORK_ID}::69)
 dexec h1 ip -6 addr add 2a0b:4e07:c4:${NETWORK_ID}::2/64 dev eth0
-dexec h1 ip -6 route replace default via 2a0b:4e07:c4:${NETWORK_ID}::1
+dexec h1 ip -6 route replace default via 2a0b:4e07:c4:${NETWORK_ID}::69
 
 # frr0 (fd63::1/64, fd70::${NETWORK_ID}/64, 2a0b:4e07:c4:${NETWORK_ID}::69/64)
 # All on eth0 (connected to ovs1)
