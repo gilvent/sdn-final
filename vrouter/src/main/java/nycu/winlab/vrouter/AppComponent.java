@@ -172,8 +172,6 @@ public class AppComponent {
 
     // WAN IPv6 peering configuration
     private Ip6Address wanLocalIp6; // fd70::35
-    private List<Ip6Address> wanPeerIp6List = new ArrayList<>(); // BGP peer IPv6s
-    private List<Ip6Address[]> internalV6Peers = new ArrayList<>();
 
     // Peer VXLAN configuration (for peer network communication)
     private ConnectPoint peer1VxlanCp;
@@ -192,6 +190,9 @@ public class AppComponent {
     private IpPrefix peer2TraditionalPrefix6;
     private List<String[]> v4Peers;
     private List<String[]> v6Peers;
+
+    // Ingress filters: connect point -> list of allowed IP prefixes
+    private Map<ConnectPoint, List<IpPrefix>> ingressFilters = new HashMap<>();
 
     private ConsistentMap<Ip4Address, MacAddress> ipToMacTable;
     private ConsistentMap<Ip6Address, MacAddress> ip6ToMacTable;
@@ -301,75 +302,12 @@ public class AppComponent {
             if (v4Peers != null && !v4Peers.isEmpty()) {
                 installV4PeersIntents();
             }
-            // if (v4Peers != null && !v4Peers.isEmpty()) {
-            // String[] firstPeer = v4Peers.get(0);
-            // wanLocalIp4 = Ip4Address.valueOf(firstPeer[0]);
-            // wanPeerIp4List.clear();
-            // internalV4Peers.clear();
-
-            // for (String[] peer : v4Peers) {
-            // Ip4Address localIp = Ip4Address.valueOf(peer[0]);
-            // Ip4Address peerIp = Ip4Address.valueOf(peer[1]);
-
-            // if (localIp.equals(wanLocalIp4)) {
-            // wanPeerIp4List.add(peerIp);
-            // log.info("Loaded WAN v4 peer: local={}, peer={}", localIp, peerIp);
-            // } else {
-            // internalV4Peers.add(new Ip4Address[] { localIp, peerIp });
-            // log.info("Loaded internal v4 peer: local={}, peer={}", localIp, peerIp);
-            // }
-            // }
-            // }
-
-            // Pre-populate WAN local IP -> frr0 MAC mapping
-            if (wanLocalIp4 != null && frr0Mac != null && ipToMacTable != null) {
-                ipToMacTable.put(wanLocalIp4, frr0Mac);
-                log.info("Pre-populated WAN local IPv4 mapping: {} -> {}", wanLocalIp4, frr0Mac);
-            }
 
             // Parse v6-peer to get WAN IPv6 and internal peer addresses
             v6Peers = config.v6Peers();
             if (v6Peers != null && !v6Peers.isEmpty()) {
                 installV6PeersIntents();
             }
-            // if (v6Peers != null && !v6Peers.isEmpty()) {
-            // String[] firstPeer = v6Peers.get(0);
-            // wanLocalIp6 = Ip6Address.valueOf(firstPeer[0]);
-
-            // wanPeerIp6List.clear();
-            // internalV6Peers.clear();
-
-            // for (String[] peer : v6Peers) {
-            // Ip6Address localIp = Ip6Address.valueOf(peer[0]);
-            // Ip6Address peerIp = Ip6Address.valueOf(peer[1]);
-
-            // // Check if this is a WAN peer (same /64 as wanLocalIp6)
-            // if (isSameSubnet64(localIp, wanLocalIp6)) {
-            // wanPeerIp6List.add(peerIp);
-            // log.info("Loaded WAN IPv6 peer: local={}, peer={}", localIp, peerIp);
-            // } else {
-            // // This is an internal peer
-            // internalV6Peers.add(new Ip6Address[] { localIp, peerIp });
-            // log.info("Loaded internal IPv6 peering config: local={}, peer={}", localIp,
-            // peerIp);
-            // }
-            // }
-            // }
-
-            // Pre-populate WAN local IPv6 -> frr0 MAC mapping
-            if (wanLocalIp6 != null && frr0Mac != null && ip6ToMacTable != null) {
-                ip6ToMacTable.put(wanLocalIp6, frr0Mac);
-                log.info("Pre-populated WAN local IPv6 mapping: {} -> {}", wanLocalIp6, frr0Mac);
-            }
-
-            // Pre-populate internal peer IPv6 -> frr0 MAC mapping (for frr0's internal IPs)
-            // for (Ip6Address[] peerPair : internalV6Peers) {
-            //     Ip6Address localIp = peerPair[0];
-            //     if (frr0Mac != null && ip6ToMacTable != null) {
-            //         ip6ToMacTable.put(localIp, frr0Mac);
-            //         log.info("Pre-populated internal IPv6 mapping: {} -> {}", localIp, frr0Mac);
-            //     }
-            // }
 
             installFrrToFpmFlowRules();
 
@@ -405,6 +343,9 @@ public class AppComponent {
             log.info("Loaded peer traditional IPv6 prefixes: peer1={}, peer2={}", peer1TraditionalPrefix6,
                     peer2TraditionalPrefix6);
 
+            // Load ingress filters
+            loadIngressFilters(config);
+
             installVirtualGatewayInterceptRule();
         }
     }
@@ -425,25 +366,51 @@ public class AppComponent {
         }
     }
 
-    /**
-     * Check if two IPv6 addresses are in the same /64 subnet.
-     */
-    private boolean isSameSubnet64(Ip6Address ip1, Ip6Address ip2) {
-        byte[] bytes1 = ip1.toOctets();
-        byte[] bytes2 = ip2.toOctets();
-
-        // Compare first 8 bytes (64 bits)
-        for (int i = 0; i < 8; i++) {
-            if (bytes1[i] != bytes2[i]) {
-                return false;
-            }
-        }
-        return true;
-    }
-
     private boolean isPeerVxlanPort(ConnectPoint cp) {
         return (peer1VxlanCp != null && cp.equals(peer1VxlanCp)) ||
                 (peer2VxlanCp != null && cp.equals(peer2VxlanCp));
+    }
+
+    private void loadIngressFilters(VRouterConfig config) {
+        ingressFilters.clear();
+
+        // Load filters for peer VXLAN ports
+        if (peer1VxlanCp != null) {
+            List<IpPrefix> filters = config.ingressFilters(peer1VxlanCp);
+            if (!filters.isEmpty()) {
+                ingressFilters.put(peer1VxlanCp, filters);
+                log.info("Loaded ingress filters for {}: {}", peer1VxlanCp, filters);
+            }
+        }
+        if (peer2VxlanCp != null) {
+            List<IpPrefix> filters = config.ingressFilters(peer2VxlanCp);
+            if (!filters.isEmpty()) {
+                ingressFilters.put(peer2VxlanCp, filters);
+                log.info("Loaded ingress filters for {}: {}", peer2VxlanCp, filters);
+            }
+        }
+
+        // Load filters for WAN port
+        if (externalPort != null) {
+            List<IpPrefix> filters = config.ingressFilters(externalPort);
+            if (!filters.isEmpty()) {
+                ingressFilters.put(externalPort, filters);
+                log.info("Loaded ingress filters for {}: {}", externalPort, filters);
+            }
+        }
+    }
+
+    private boolean isAllowedIngress(ConnectPoint srcPoint, IpAddress dstIp) {
+        List<IpPrefix> allowedPrefixes = ingressFilters.get(srcPoint);
+        if (allowedPrefixes == null || allowedPrefixes.isEmpty()) {
+            return true; // No filter configured, allow all
+        }
+        for (IpPrefix prefix : allowedPrefixes) {
+            if (prefix.contains(dstIp)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -509,34 +476,12 @@ public class AppComponent {
                 Ip4Address dstIp = Ip4Address.valueOf(ipv4.getDestinationAddress());
                 Ip4Address srcIp = Ip4Address.valueOf(ipv4.getSourceAddress());
 
-                if (isPeerVxlanPort(srcPoint)) {
-                    // TODO: Allow only to frr0 and local SDN prefix
-                    if (localSdnPrefix == null || !localSdnPrefix.contains(dstIp)) {
-                        // log.warn("[Peer VXLAN] Blocked IPv4: src {} -> dst {} (not in local SDN)",
-                        // srcIp, dstIp);
+                // Apply ingress filter for peer VXLAN and WAN ports
+                if (ingressFilters.containsKey(srcPoint)) {
+                    if (!isAllowedIngress(srcPoint, dstIp)) {
                         return;
                     }
-                    log.info("[Peer VXLAN] Allowed IPv4: src {} -> dst {}", srcIp, dstIp);
-                    // Fall through to normal processing (frr0Mac intercept)
-                }
-
-                // Handle IPv4 from WAN port
-                if (externalPort != null && srcPoint.equals(externalPort)) {
-
-                    if (wanLocalIp4 != null && dstIp.equals(wanLocalIp4)) {
-                        if (frr0ConnectPoint != null) {
-                            packetOut(frr0ConnectPoint, eth);
-                        }
-                        return;
-                    }
-                    // TODO: Allow to frr0 and to local traditional prefix only
-                    if (localTraditionalPrefix != null && localTraditionalPrefix.contains(dstIp)) {
-                        log.info("[WAN] Allowing traffic to traditional network: dstIp={}", dstIp);
-                        // Fall through to L3 routing
-                    } else {
-                        // Drop external IPv4 traffic not destined for frr0 or traditional network
-                        return;
-                    }
+                    log.info("[Ingress Filter] Allowed IPv4 from {}: {} -> {}", srcPoint, srcIp, dstIp);
                 }
 
                 // Handle IPv4 traffic FROM frr0 TO WAN peers (outbound BGP traffic)
@@ -582,23 +527,11 @@ public class AppComponent {
             if (eth.getEtherType() == Ethernet.TYPE_IPV6) {
                 ConnectPoint srcPoint = context.inPacket().receivedFrom();
                 IPv6 ipv6 = (IPv6) eth.getPayload();
+                Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
+                Ip6Address srcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
 
-                // TODO: Allow only to frr0 and local SDN prefix
-                if (isPeerVxlanPort(srcPoint)) {
-                    Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
-                    Ip6Address srcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
-                    // Block if destination not in local SDN prefix
-                    if (localSdnPrefix6 == null || !localSdnPrefix6.contains(dstIp)) {
-                        return;
-                    }
-                    log.info("[Peer VXLAN] Allowed IPv6: src {} -> dst {}", srcIp, dstIp);
-                }
-
-                // Handle traffic FROM WAN port (inbound)
+                // Handle NDP packets from WAN port separately (before ingress filter)
                 if (externalPort != null && srcPoint.equals(externalPort)) {
-                    Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
-
-                    // Handle NDP packets from WAN port separately
                     if (ipv6.getNextHeader() == IPv6.PROTOCOL_ICMP6) {
                         ICMP6 icmp6 = (ICMP6) ipv6.getPayload();
                         byte type = icmp6.getIcmpType();
@@ -607,26 +540,14 @@ public class AppComponent {
                             return;
                         }
                     }
+                }
 
-                    // Allow traffic to frr0's WAN IP
-                    if (wanLocalIp6 != null && dstIp.equals(wanLocalIp6)) {
-                        if (frr0ConnectPoint != null) {
-                            log.info("Forwarding WAN IPv6 to frr0: {} -> {}", dstIp, frr0ConnectPoint);
-                            packetOut(frr0ConnectPoint, eth);
-                        }
+                // Apply ingress filter for peer VXLAN and WAN ports (IPv6)
+                if (ingressFilters.containsKey(srcPoint)) {
+                    if (!isAllowedIngress(srcPoint, dstIp)) {
                         return;
                     }
-
-                    // TODO: Allow to frr0 and to local traditional prefix only
-                    // Allow traffic to local traditional prefix (return traffic from h3 via WAN)
-                    if (localTraditionalPrefix6 != null && localTraditionalPrefix6.contains(dstIp)) {
-                        log.info("[WAN] Allowing IPv6 traffic to traditional network: dstIp={}", dstIp);
-                        // Fall through to L3 routing (frr0Mac intercept will handle it)
-                    } else {
-                        // Block other IPv6 traffic from WAN
-                        log.debug("Blocking WAN IPv6 not for frr0 or traditional: dstIp={}", dstIp);
-                        return;
-                    }
+                    log.info("[Ingress Filter] Allowed IPv6 from {}: {} -> {}", srcPoint, srcIp, dstIp);
                 }
 
                 // Handle NDP (Neighbor Solicitation and Advertisement)

@@ -36,7 +36,27 @@
         "peer1-traditional-prefix": "172.17.yy.0/24",
         "peer2-traditional-prefix": "172.17.zz.0/24",
         "peer1-traditional-prefix6": "2a0b:4e07:c4:1yy::/64",
-        "peer2-traditional-prefix6": "2a0b:4e07:c4:1zz::/64"
+        "peer2-traditional-prefix6": "2a0b:4e07:c4:1zz::/64",
+        "ingress-filters": {
+          "of:0000000000000002/4": [
+            "172.16.xx.0/24",
+            "192.168.70.xx/32",
+            "2a0b:4e07:c4:xx::/64",
+            "fd70::xx/128"
+          ],
+          "of:0000000000000002/5": [
+            "172.16.xx.0/24",
+            "192.168.70.xx/32",
+            "2a0b:4e07:c4:xx::/64",
+            "fd70::xx/128"
+          ],
+          "of:0000ceaa83f3a445/3": [
+            "172.17.xx.0/24",
+            "192.168.70.xx/32",
+            "2a0b:4e07:c4:1xx::/64",
+            "fd70::xx/128"
+          ]
+        }
       }
     }
   },
