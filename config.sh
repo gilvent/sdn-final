@@ -29,11 +29,11 @@ echo "Configuring AS65xx0 (h1, h2, ctl, r0/frr0)..."
 
 # h2 (172.16.${NETWORK_ID}.3/24)
 dexec h2 ip addr add 172.16.${NETWORK_ID}.3/24 dev eth0
-dexec h2 ip route replace default via 172.16.${NETWORK_ID}.1 # Default route to vrouter virtual gateway
+dexec h2 ip route replace default via 172.16.${NETWORK_ID}.69
 
 # h1 (172.16.${NETWORK_ID}.2/24)
 dexec h1 ip addr add 172.16.${NETWORK_ID}.2/24 dev eth0
-dexec h1 ip route replace default via 172.16.${NETWORK_ID}.1 # Default route to vrouter virtual gateway
+dexec h1 ip route replace default via 172.16.${NETWORK_ID}.69
 
 # ONOS BGP Peering Interface
 echo "Configuring ONOS container for BGP peering..."

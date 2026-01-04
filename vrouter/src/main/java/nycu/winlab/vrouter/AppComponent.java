@@ -34,6 +34,7 @@ import org.onosproject.core.ApplicationId;
 import org.onosproject.core.CoreService;
 import org.onosproject.net.packet.PacketService;
 import org.onosproject.net.ConnectPoint;
+import org.onosproject.net.Device;
 import org.onosproject.net.DeviceId;
 import org.onosproject.net.Host;
 import org.onosproject.net.HostId;
@@ -173,7 +174,6 @@ public class AppComponent {
     private Ip6Address wanLocalIp6; // fd70::35
     private List<Ip6Address> wanPeerIp6List = new ArrayList<>(); // BGP peer IPv6s
     private List<Ip6Address[]> internalV6Peers = new ArrayList<>();
-    private List<Ip4Address[]> internalV4Peers = new ArrayList<>();
 
     // Peer VXLAN configuration (for peer network communication)
     private ConnectPoint peer1VxlanCp;
@@ -190,6 +190,7 @@ public class AppComponent {
     private IpPrefix peer2TraditionalPrefix;
     private IpPrefix peer1TraditionalPrefix6;
     private IpPrefix peer2TraditionalPrefix6;
+    private List<String[]> v4Peers;
 
     private ConsistentMap<Ip4Address, MacAddress> ipToMacTable;
     private ConsistentMap<Ip6Address, MacAddress> ip6ToMacTable;
@@ -295,35 +296,28 @@ public class AppComponent {
             log.info("Loaded frr1 connect point: {}", frr1ConnectPoint);
 
             // Parse v4-peer to get WAN local, WAN peers, and internal peers
-            List<String[]> v4Peers = config.v4Peers();
+            v4Peers = config.v4Peers();
             if (v4Peers != null && !v4Peers.isEmpty()) {
-                String[] firstPeer = v4Peers.get(0);
-                wanLocalIp4 = Ip4Address.valueOf(firstPeer[0]);
-                wanPeerIp4List.clear();
-                internalV4Peers.clear();
-
-                for (String[] peer : v4Peers) {
-                    Ip4Address localIp = Ip4Address.valueOf(peer[0]);
-                    Ip4Address peerIp = Ip4Address.valueOf(peer[1]);
-
-                    if (localIp.equals(wanLocalIp4)) {
-                        wanPeerIp4List.add(peerIp);
-                        log.info("Loaded WAN v4 peer: local={}, peer={}", localIp, peerIp);
-                    } else {
-                        internalV4Peers.add(new Ip4Address[] { localIp, peerIp });
-                        log.info("Loaded internal v4 peer: local={}, peer={}", localIp, peerIp);
-                    }
-                }
+                installV4PeersIntents();
             }
+            // if (v4Peers != null && !v4Peers.isEmpty()) {
+            // String[] firstPeer = v4Peers.get(0);
+            // wanLocalIp4 = Ip4Address.valueOf(firstPeer[0]);
+            // wanPeerIp4List.clear();
+            // internalV4Peers.clear();
 
-            // // Pre-populate frr0 IP-MAC mappings for L3 routing
-            // if (frr0Ip4 != null && frr0Mac != null && ipToMacTable != null) {
-            // ipToMacTable.put(frr0Ip4, frr0Mac);
-            // log.info("Pre-populated frr0 IPv4 mapping: {} -> {}", frr0Ip4, frr0Mac);
+            // for (String[] peer : v4Peers) {
+            // Ip4Address localIp = Ip4Address.valueOf(peer[0]);
+            // Ip4Address peerIp = Ip4Address.valueOf(peer[1]);
+
+            // if (localIp.equals(wanLocalIp4)) {
+            // wanPeerIp4List.add(peerIp);
+            // log.info("Loaded WAN v4 peer: local={}, peer={}", localIp, peerIp);
+            // } else {
+            // internalV4Peers.add(new Ip4Address[] { localIp, peerIp });
+            // log.info("Loaded internal v4 peer: local={}, peer={}", localIp, peerIp);
             // }
-            // if (frr0Ip6 != null && frr0Mac != null && ip6ToMacTable != null) {
-            // ip6ToMacTable.put(frr0Ip6, frr0Mac);
-            // log.info("Pre-populated frr0 IPv6 mapping: {} -> {}", frr0Ip6, frr0Mac);
+            // }
             // }
 
             // Pre-populate WAN local IP -> frr0 MAC mapping
@@ -374,13 +368,8 @@ public class AppComponent {
 
             installFrrToFpmFlowRules();
 
-            installWanForwardingIntents();
-
             // Internal peer forwarding (IPv6)
             installInternalPeerForwardingIntents();
-
-            // Internal peer forwarding flow rules (IPv4)
-            installInternalPeerForwardingFlowRules();
 
             // Load peer VXLAN configuration
             peer1VxlanCp = config.peer1VxlanCp();
@@ -519,6 +508,7 @@ public class AppComponent {
                 Ip4Address srcIp = Ip4Address.valueOf(ipv4.getSourceAddress());
 
                 if (isPeerVxlanPort(srcPoint)) {
+                    // TODO: Allow only to frr0 and local SDN prefix
                     if (localSdnPrefix == null || !localSdnPrefix.contains(dstIp)) {
                         // log.warn("[Peer VXLAN] Blocked IPv4: src {} -> dst {} (not in local SDN)",
                         // srcIp, dstIp);
@@ -530,13 +520,14 @@ public class AppComponent {
 
                 // Handle IPv4 from WAN port
                 if (externalPort != null && srcPoint.equals(externalPort)) {
+
                     if (wanLocalIp4 != null && dstIp.equals(wanLocalIp4)) {
                         if (frr0ConnectPoint != null) {
                             packetOut(frr0ConnectPoint, eth);
                         }
                         return;
                     }
-
+                    // TODO: Allow to frr0 and to local traditional prefix only
                     if (localTraditionalPrefix != null && localTraditionalPrefix.contains(dstIp)) {
                         log.info("[WAN] Allowing traffic to traditional network: dstIp={}", dstIp);
                         // Fall through to L3 routing
@@ -558,30 +549,28 @@ public class AppComponent {
                     }
                 }
 
-                // Check for intercepted packets: dstMAC = frr0 MAC, dstIP in local subnet (but
-                // not frr0's IP)
-                if (frr0Mac != null && eth.getDestinationMAC().equals(frr0Mac) &&
-                        
-                        frr0Ip4 != null && !dstIp.equals(frr0Ip4)) {
-                    
-                    
+                log.info("[DEBUG] IPv4 Packet from {}: srcIP={}, dstIP={}, srcMAC={}, dstMAC={}",
+                        srcPoint, srcIp, dstIp, eth.getSourceMAC(), eth.getDestinationMAC());
+
+                // BGP IPv4 are all handled with flow rules
+                // All other IPv4 packets to frr0Mac are assumed for gateway routing
+                if (frr0Mac != null && eth.getDestinationMAC().equals(frr0Mac)) {
+                    // Packets to local SDN prefix -> route to local host
                     if (localSdnPrefix != null && localSdnPrefix.contains(dstIp)) {
-                        log.info("[Gateway] Intercept Inter-AS packet to local: dstMAC={}, dstIP={}",
-                            eth.getDestinationMAC(), dstIp);
-                        gatewayToLocalHost(context, eth);
+                        log.info(
+                                "[Gateway] Route Inter-AS IPv4 packet to local subnet: dstMAC={}, dstIP={}",
+                                eth.getDestinationMAC(), dstIp);
+                        routeToLocalSubnet(context, eth);
+                        return;
                     } else {
-                        log.info("[Gateway] Intercept Inter-AS traffic IPv4: dstMAC={}, dstIP={}",
+                        // Packets to local traditional prefix -> route via L3 (frr0)
+                        log.info(
+                                "[Gateway] Route Transit IPv4 packet: dstMAC={}, dstIP={}",
                                 eth.getDestinationMAC(), dstIp);
                         handleL3RoutingIPv4(context, eth);
+                        return;
+
                     }
-
-                    return;
-                }
-
-                // Check if this is L3 routing (destination is our virtual gateway MAC)
-                if (virtualGatewayMac != null && eth.getDestinationMAC().equals(virtualGatewayMac)) {
-                    handleL3RoutingIPv4(context, eth);
-                    return;
                 }
 
                 forwardByLearningBridge(context, eth);
@@ -1240,16 +1229,16 @@ public class AppComponent {
     /**
      * Handle packets intercepted by virtual gateway interception rule.
      * These are packets from AS65351 (via frr0) destined to local hosts with:
-     * - dstMAC = frr0 MAC
+
      * - dstIP = local host IP (in 172.16.35.0/24, but not frr0's IP)
      */
-    private void gatewayToLocalHost(PacketContext context, Ethernet eth) {
+    private void routeToLocalSubnet(PacketContext context, Ethernet eth) {
         IPv4 ipv4 = (IPv4) eth.getPayload();
         Ip4Address dstIp = Ip4Address.valueOf(ipv4.getDestinationAddress());
         Ip4Address srcIp = Ip4Address.valueOf(ipv4.getSourceAddress());
         DeviceId ingressDevice = context.inPacket().receivedFrom().deviceId();
 
-        log.info("[Gateway] Inter-AS packet to local subnet: src {} -> dst {} on device {}",
+        log.info("[Gateway] Routing packet to local subnet: src {} -> dst {} on device {}",
                 srcIp, dstIp, ingressDevice);
 
         MacAddress dstMac = ipToMacTable.asJavaMap().get(dstIp);
@@ -1265,29 +1254,16 @@ public class AppComponent {
         ConnectPoint outPoint = findHostEdgePoint(dstMac);
 
         if (outPoint == null) {
-            // Try bridge table - search all devices
             outPoint = findConnectPointInBridgeTable(dstMac);
         }
 
         if (outPoint == null) {
-            log.warn("[Gateway] Cannot find output port for MAC {}. Trigger ARP Request.", dstMac);
+            log.warn("[Gateway] No output point with MAC {}. Trigger ARP Request.", dstMac);
             sendArpRequest(dstIp);
             return;
         }
 
-        // Rewrite MAC addresses and forward
-        Ethernet routedPkt = eth.duplicate();
-        routedPkt.setSourceMACAddress(virtualGatewayMac);
-        routedPkt.setDestinationMACAddress(dstMac);
-
-        log.info("[Gateway] Routing to local host {} via port {}/{}",
-                dstIp, outPoint.deviceId(), outPoint.port());
-
-        packetOut(outPoint, routedPkt);
-
-        // Install per-host flow rule for subsequent packets
-        installFrr0ToLocalHostFlowRule(context, dstIp, dstMac, outPoint);
-
+        routePacket(context, eth, dstMac, outPoint);
     }
 
     /**
@@ -1382,7 +1358,7 @@ public class AppComponent {
             log.warn("L3 Routing: Cannot find out interface for nextHop {}. Drop packet.", nextHop);
             return;
         }
-        
+
         routePacket(context, eth, dstMac, outPoint);
     }
 
@@ -1493,7 +1469,7 @@ public class AppComponent {
 
         packetOut(outPoint, routedPkt);
 
-        installL3FlowRule(context, eth, dstMac, outPoint.port(), outPoint);
+        installL3Forwarding(context, eth, dstMac, outPoint);
     }
 
     private ConnectPoint findIp6NextHopOutput(Ethernet eth, IpAddress nextHopIp6) {
@@ -1536,49 +1512,43 @@ public class AppComponent {
 
         packetOut(outPoint, routedPkt);
 
-        installL3FlowRule(context, eth, dstMac, outPoint.port(), outPoint);
+        installL3Forwarding(context, eth, dstMac, outPoint);
     }
 
-    private void installL3FlowRule(PacketContext context, Ethernet eth, MacAddress dstMac, PortNumber outPort,
+    private void installL3Forwarding(PacketContext context, Ethernet eth, MacAddress dstMac,
             ConnectPoint outPoint) {
-        DeviceId deviceId = context.inPacket().receivedFrom().deviceId();
-
-        if (!deviceId.equals(outPoint.deviceId())) {
-            return;
-        }
-
+        ConnectPoint ingressCp = context.inPacket().receivedFrom();
         TrafficSelector.Builder selectorBuilder = DefaultTrafficSelector.builder()
-                .matchEthDst(virtualGatewayMac);
+                .matchEthDst(frr0Mac);
 
         if (eth.getEtherType() == Ethernet.TYPE_IPV4) {
             IPv4 ipv4 = (IPv4) eth.getPayload();
             selectorBuilder.matchEthType(Ethernet.TYPE_IPV4)
-                    .matchIPDst(org.onlab.packet.IpPrefix.valueOf(
+                    .matchIPDst(IpPrefix.valueOf(
                             Ip4Address.valueOf(ipv4.getDestinationAddress()), 32));
         } else if (eth.getEtherType() == Ethernet.TYPE_IPV6) {
             IPv6 ipv6 = (IPv6) eth.getPayload();
             selectorBuilder.matchEthType(Ethernet.TYPE_IPV6)
-                    .matchIPv6Dst(org.onlab.packet.IpPrefix.valueOf(
+                    .matchIPv6Dst(IpPrefix.valueOf(
                             Ip6Address.valueOf(ipv6.getDestinationAddress()), 128));
         }
 
         TrafficTreatment treatment = DefaultTrafficTreatment.builder()
                 .setEthSrc(virtualGatewayMac)
                 .setEthDst(dstMac)
-                .setOutput(outPort)
                 .build();
 
-        FlowRule flowRule = DefaultFlowRule.builder()
-                .forDevice(deviceId)
-                .withSelector(selectorBuilder.build())
-                .withTreatment(treatment)
-                .withPriority(40) // Higher priority than L2 rules
-                .fromApp(appId)
-                .makeTemporary(30)
+        PointToPointIntent forwardingIntent = PointToPointIntent.builder()
+                .appId(appId)
+                .selector(selectorBuilder.build())
+                .treatment(treatment)
+                .filteredIngressPoint(new FilteredConnectPoint(ingressCp))
+                .filteredEgressPoint(new FilteredConnectPoint(outPoint))
+                .priority(60)
                 .build();
 
-        flowRuleService.applyFlowRules(flowRule);
-        log.info("Installed L3 flow rule for destination IP on device {}", deviceId);
+        intentService.submit(forwardingIntent);
+        log.info("Installed L3 forwarding from {} -> {}", ingressCp, outPoint);
     }
 
     private void forwardByLearningBridge(PacketContext context, Ethernet ethPkt) {
@@ -1643,21 +1613,6 @@ public class AppComponent {
         packetOut(context, PortNumber.FLOOD);
     }
 
-    /**
-     * Flood a rewritten Ethernet packet to all edge ports except the source.
-     */
-    private void floodPacket(PacketContext context, Ethernet eth) {
-        ConnectPoint srcPoint = context.inPacket().receivedFrom();
-        Iterable<ConnectPoint> edgePoints = edgePortService.getEdgePoints();
-
-        for (ConnectPoint cp : edgePoints) {
-            if (cp.equals(srcPoint)) {
-                continue;
-            }
-            packetOut(cp, eth);
-        }
-    }
-
     private void packetOut(PacketContext context, PortNumber portNumber) {
         context.treatmentBuilder().setOutput(portNumber);
         context.send();
@@ -1688,70 +1643,6 @@ public class AppComponent {
         flowRuleService.applyFlowRules(flowRule);
 
         packetOut(context, portNumber);
-    }
-
-    /**
-     * Install PointToPointIntent for IPv4 forwarding between frr0 and WAN peers.
-     * Creates bidirectional intents for BGP traffic with AS65000, AS65340, AS65360.
-     */
-    private void installWanForwardingIntents() {
-        if (wanPeerIp4List.isEmpty() || wanLocalIp4 == null || externalPort == null || frr0ConnectPoint == null) {
-            log.info("WAN forwarding intents not installed: missing configuration");
-            return;
-        }
-
-        // Install outbound intents for each WAN peer (frr0 -> peer)
-        for (Ip4Address peerIp : wanPeerIp4List) {
-            TrafficSelector toWanSelector = DefaultTrafficSelector.builder()
-                    .matchEthType(Ethernet.TYPE_IPV4)
-                    .matchIPDst(IpPrefix.valueOf(peerIp, 32))
-                    .build();
-
-            PointToPointIntent toWanIntent = PointToPointIntent.builder()
-                    .appId(appId)
-                    .selector(toWanSelector)
-                    .treatment(DefaultTrafficTreatment.builder().build())
-                    .filteredIngressPoint(new FilteredConnectPoint(frr0ConnectPoint))
-                    .filteredEgressPoint(new FilteredConnectPoint(externalPort))
-                    .priority(50000)
-                    .build();
-
-            intentService.submit(toWanIntent);
-            log.info("Installed WAN intent: frr0 ({}) -> peer {} ({})", frr0ConnectPoint, peerIp, externalPort);
-        }
-
-        // Single inbound intent: WAN -> frr0 (traffic to frr0's WAN IP)
-        TrafficSelector fromWanSelector = DefaultTrafficSelector.builder()
-                .matchEthType(Ethernet.TYPE_IPV4)
-                .matchIPDst(IpPrefix.valueOf(wanLocalIp4, 32))
-                .build();
-
-        PointToPointIntent fromWanIntent = PointToPointIntent.builder()
-                .appId(appId)
-                .selector(fromWanSelector)
-                .treatment(DefaultTrafficTreatment.builder().build())
-                .filteredIngressPoint(new FilteredConnectPoint(externalPort))
-                .filteredEgressPoint(new FilteredConnectPoint(frr0ConnectPoint))
-                .priority(50000)
-                .build();
-
-        intentService.submit(fromWanIntent);
-        log.info("Installed WAN intent: WAN ({}) -> frr0 ({})", externalPort, frr0ConnectPoint);
-
-        log.info("WAN IPv4 forwarding intents installed for {} peers", wanPeerIp4List.size());
-
-        // Note: IPv6 WAN forwarding is handled by the packet processor
-        // We do not install intents for IPv6 WAN traffic because:
-        // 1. The frr0ConnectPoint (ovs1) and externalPort (ovs2) are on different
-        // switches
-        // 2. The veth link between ovs1 and ovs2 is not discovered by ONOS via LLDP
-        // 3. Intents fail to compile with "Unable to compile intent" error
-        // 4. The packet processor already correctly handles WAN IPv6 traffic using
-        // packetOut
-        if (!wanPeerIp6List.isEmpty() && wanLocalIp6 != null) {
-            log.info("WAN IPv6 peering configured: local={}, peers={}", wanLocalIp6, wanPeerIp6List);
-            log.info("WAN IPv6 traffic will be handled by packet processor (no intents)");
-        }
     }
 
     private void installFrrToFpmFlowRules() {
@@ -1809,87 +1700,6 @@ public class AppComponent {
                 .add();
 
         flowObjectiveService.forward(frr0ConnectPoint.deviceId(), onosToFrrFwd);
-    }
-
-    /**
-     * Install bidirectional flow rules for internal IPv4 peer traffic.
-     * This enables BGP communication between frr0 and frr1 on the 192.168.63.0/24
-     * network.
-     * Uses direct flow rules instead of intents since both routers are on the same
-     * switch.
-     */
-    private void installInternalPeerForwardingFlowRules() {
-        if (internalV4Peers.isEmpty()) {
-            log.info("No internal IPv4 peers configured");
-            return;
-        }
-
-        if (frr0ConnectPoint == null || frr1ConnectPoint == null) {
-            log.warn("Cannot install internal peer flow rules: frr0ConnectPoint={}, frr1ConnectPoint={}",
-                    frr0ConnectPoint, frr1ConnectPoint);
-            return;
-        }
-
-        // Both frr0 and frr1 should be on the same device for direct flow rules
-        if (!frr0ConnectPoint.deviceId().equals(frr1ConnectPoint.deviceId())) {
-            log.warn("frr0 and frr1 are on different devices, cannot use direct flow rules");
-            return;
-        }
-
-        DeviceId deviceId = frr0ConnectPoint.deviceId();
-
-        for (Ip4Address[] peerPair : internalV4Peers) {
-            Ip4Address frr0InternalIp = peerPair[0]; // e.g., 192.168.63.1
-            Ip4Address frr1InternalIp = peerPair[1]; // e.g., 192.168.63.2
-
-            // Flow rule 1: Traffic to frr0's internal IP -> output to frr0 port
-            TrafficSelector toFrr0Selector = DefaultTrafficSelector.builder()
-                    .matchEthType(Ethernet.TYPE_IPV4)
-                    .matchIPDst(IpPrefix.valueOf(frr0InternalIp, 32))
-                    .build();
-
-            TrafficTreatment toFrr0Treatment = DefaultTrafficTreatment.builder()
-                    .setOutput(frr0ConnectPoint.port())
-                    .build();
-
-            FlowRule toFrr0Rule = DefaultFlowRule.builder()
-                    .forDevice(deviceId)
-                    .withSelector(toFrr0Selector)
-                    .withTreatment(toFrr0Treatment)
-                    .withPriority(45)
-                    .fromApp(appId)
-                    .makePermanent()
-                    .build();
-
-            flowRuleService.applyFlowRules(toFrr0Rule);
-            log.info("Installed internal peer flow rule: to {} -> port {}",
-                    frr0InternalIp, frr0ConnectPoint.port());
-
-            // Flow rule 2: Traffic to frr1's internal IP -> output to frr1 port
-            TrafficSelector toFrr1Selector = DefaultTrafficSelector.builder()
-                    .matchEthType(Ethernet.TYPE_IPV4)
-                    .matchIPDst(IpPrefix.valueOf(frr1InternalIp, 32))
-                    .build();
-
-            TrafficTreatment toFrr1Treatment = DefaultTrafficTreatment.builder()
-                    .setOutput(frr1ConnectPoint.port())
-                    .build();
-
-            FlowRule toFrr1Rule = DefaultFlowRule.builder()
-                    .forDevice(deviceId)
-                    .withSelector(toFrr1Selector)
-                    .withTreatment(toFrr1Treatment)
-                    .withPriority(45)
-                    .fromApp(appId)
-                    .makePermanent()
-                    .build();
-
-            flowRuleService.applyFlowRules(toFrr1Rule);
-            log.info("Installed internal peer flow rule: to {} -> port {}",
-                    frr1InternalIp, frr1ConnectPoint.port());
-
-            log.info("Internal IPv4 BGP forwarding enabled: {} <-> {}", frr0InternalIp, frr1InternalIp);
-        }
     }
 
     /**
@@ -1956,37 +1766,123 @@ public class AppComponent {
     }
 
     /**
-     * Install flow rule to intercept packets where:
-     * - dstMAC = frr0 MAC
-     * - dstIP is in local SDN subnet (172.16.35.0/24) but NOT frr0's IP
-     * (172.16.35.69)
-     *
-     * These packets are from AS65351 (h3) routed by frr0 to local hosts.
-     * They need to be intercepted and handled by virtual gateway for proper L3
-     * routing.
+     * Install PointToPointIntents for IPv4 BGP peers exchange.
+     * Uses interfaceService to dynamically determine connect points based on peer
+     * IPs:
+     * AS65xx0 <-> (AS65yy0 / AS65zz0) through peer VXLAN interface
+     * AS65xx0 <-> AS65000 through WAN interface
+     * AS65xx0 <-> AS65xx1 through frr1 interface
      */
-    private void installVirtualGatewayInterceptRule() {
-        if (frr0Mac == null || frr0ConnectPoint == null) {
-            log.warn("Cannot install virtual gateway intercept rule: frr0Mac={}, frr0ConnectPoint={}",
-                    frr0Mac, frr0ConnectPoint);
+    private void installV4PeersIntents() {
+        if (v4Peers == null || v4Peers.isEmpty()) {
+            log.info("No v4-peers configured for intent installation");
             return;
         }
 
-        // Install on the device where frr0 is connected (ovs1)
-        DeviceId deviceId = frr0ConnectPoint.deviceId();
+        if (frr0ConnectPoint == null) {
+            log.warn("Cannot install v4 peer intents: frr0ConnectPoint not configured");
+            return;
+        }
+
+        log.info("Available interfaces from InterfaceService:");
+        for (Interface intf : interfaceService.getInterfaces()) {
+            log.info("  Interface: {} at {} with IPs: {}", intf.name(), intf.connectPoint(), intf.ipAddressesList());
+        }
+        int installedCount = 0;
+        for (String[] peer : v4Peers) {
+            Ip4Address localIp = Ip4Address.valueOf(peer[0]);
+            Ip4Address peerIp = Ip4Address.valueOf(peer[1]);
+
+            // Find connect points using interfaceService
+            Interface localIntf = interfaceService.getMatchingInterface(localIp);
+            Interface peerIntf = interfaceService.getMatchingInterface(peerIp);
+
+            log.info("v4-peer lookup: local={} (intf={}), peer={} (intf={})", localIp,
+                    localIntf != null ? localIntf.name() : "null", peerIp, peerIntf != null ? peerIntf.name() : "null");
+
+            // Determine connect points - fallback to frr0ConnectPoint for local IPs
+            ConnectPoint localCp = (localIntf != null) ? localIntf.connectPoint() : frr0ConnectPoint;
+            ConnectPoint peerCp = (peerIntf != null) ? peerIntf.connectPoint() : null;
+
+            if (peerCp == null) {
+                log.warn("No interface found for peer IP {}, skipping", peerIp);
+                continue;
+            }
+
+            // Intent 1: Traffic to peer IP (local -> peer)
+            TrafficSelector toPeerSelector = DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV4)
+                    .matchIPDst(IpPrefix.valueOf(peerIp, 32))
+                    .build();
+
+            PointToPointIntent toPeerIntent = PointToPointIntent.builder()
+                    .appId(appId)
+                    .selector(toPeerSelector)
+                    .treatment(DefaultTrafficTreatment.builder().build())
+                    .filteredIngressPoint(new FilteredConnectPoint(localCp))
+                    .filteredEgressPoint(new FilteredConnectPoint(peerCp))
+                    .priority(50000)
+                    .build();
+
+            intentService.submit(toPeerIntent);
+            log.info("Installed v4-peer intent: to {} via {} -> {}", peerIp, localCp, peerCp);
+
+            // Intent 2: Traffic to local IP (peer -> local)
+            TrafficSelector toLocalSelector = DefaultTrafficSelector.builder()
+                    .matchEthType(Ethernet.TYPE_IPV4)
+                    .matchIPDst(IpPrefix.valueOf(localIp, 32))
+                    .build();
+
+            PointToPointIntent toLocalIntent = PointToPointIntent.builder()
+                    .appId(appId)
+                    .selector(toLocalSelector)
+                    .treatment(DefaultTrafficTreatment.builder().build())
+                    .filteredIngressPoint(new FilteredConnectPoint(peerCp))
+                    .filteredEgressPoint(new FilteredConnectPoint(localCp))
+                    .priority(50000)
+                    .build();
+
+            intentService.submit(toLocalIntent);
+            log.info("Installed v4-peer intent: to {} via {} -> {}", localIp, peerCp, localCp);
+
+            installedCount++;
+        }
+
+        log.info("Installed {} bidirectional v4-peer intent pairs", installedCount);
+    }
+
+    /**
+     * Install flow rule to intercept packets where:
+     * - dstMAC = frr0 MAC
+     * 
+     * BGP peering packets (dstIP = frr0 IPs) forwarded by flow rules and should not be intercepted.
+     */
+    private void installVirtualGatewayInterceptRule() {
+        if (frr0Mac == null) {
+            log.warn("Cannot install virtual gateway intercept rule: frr0Mac is null");
+            return;
+        }
 
         // Treatment: Send to controller for virtual gateway processing
         TrafficTreatment treatment = DefaultTrafficTreatment.builder()
                 .setOutput(PortNumber.CONTROLLER)
                 .build();
 
-        // IPv4 intercept rule: dstMAC = frr0 MAC, dstIP in local SDN subnet
-        if (localSdnPrefix != null && frr0Ip4 != null) {
-            TrafficSelector selectorV4 = DefaultTrafficSelector.builder()
-                    .matchEthType(Ethernet.TYPE_IPV4)
-                    .matchEthDst(frr0Mac)
-                    .matchIPDst(localSdnPrefix)
-                    .build();
+        // IPv4 selector: match dstMAC = frr0 MAC
+        TrafficSelector selectorV4 = DefaultTrafficSelector.builder()
+                .matchEthType(Ethernet.TYPE_IPV4)
+                .matchEthDst(frr0Mac)
+                .build();
+
+        // IPv6 selector: match dstMAC = frr0 MAC
+        TrafficSelector selectorV6 = DefaultTrafficSelector.builder()
+                .matchEthType(Ethernet.TYPE_IPV6)
+                .matchEthDst(frr0Mac)
+                .build();
+
+        // Install on all devices
+        for (Device device : deviceService.getDevices()) {
+            DeviceId deviceId = device.id();
 
             FlowRule flowRuleV4 = DefaultFlowRule.builder()
                     .forDevice(deviceId)
@@ -1995,43 +1891,6 @@ public class AppComponent {
                     .withPriority(50)
                     .fromApp(appId)
                     .makePermanent()
-                    .build();
-
-            flowRuleService.applyFlowRules(flowRuleV4);
-            log.info("Installed virtual gateway IPv4 intercept rule on device {} for dstMAC={}, dstIP={}",
-                    deviceId, frr0Mac, localSdnPrefix);
-        }
-
-        // IPv4 intercept rule for traditional network: dstMAC = frr0 MAC, dstIP in
-        // traditional subnet
-        if (localTraditionalPrefix != null) {
-            TrafficSelector selectorV4Trad = DefaultTrafficSelector.builder()
-                    .matchEthType(Ethernet.TYPE_IPV4)
-                    .matchEthDst(frr0Mac)
-                    .matchIPDst(localTraditionalPrefix)
-                    .build();
-
-            FlowRule flowRuleV4Trad = DefaultFlowRule.builder()
-                    .forDevice(deviceId)
-                    .withSelector(selectorV4Trad)
-                    .withTreatment(treatment)
-                    .withPriority(50)
-                    .fromApp(appId)
-                    .makePermanent()
-                    .build();
-
-            flowRuleService.applyFlowRules(flowRuleV4Trad);
-            log.info(
-                    "Installed virtual gateway IPv4 intercept rule for traditional network on device {} for dstMAC={}, dstIP={}",
-                    deviceId, frr0Mac, localTraditionalPrefix);
-        }
-
-        // IPv6 intercept rule: dstMAC = frr0 MAC, dstIP in local SDN IPv6 subnet
-        if (localSdnPrefix6 != null && frr0Ip6 != null) {
-            TrafficSelector selectorV6 = DefaultTrafficSelector.builder()
-                    .matchEthType(Ethernet.TYPE_IPV6)
-                    .matchEthDst(frr0Mac)
-                    .matchIPv6Dst(localSdnPrefix6)
                     .build();
 
             FlowRule flowRuleV6 = DefaultFlowRule.builder()
@@ -2043,86 +1902,10 @@ public class AppComponent {
                     .makePermanent()
                     .build();
 
-            flowRuleService.applyFlowRules(flowRuleV6);
-            log.info("Installed virtual gateway IPv6 intercept rule on device {} for dstMAC={}, dstIP={}",
-                    deviceId, frr0Mac, localSdnPrefix6);
+            flowRuleService.applyFlowRules(flowRuleV4, flowRuleV6);
+            log.info("Installed virtual gateway intercept rules on device {} for dstMAC={}",
+                    deviceId, frr0Mac);
         }
-
-        // IPv6 intercept rule for traditional network: dstMAC = frr0 MAC, dstIP in
-        // local traditional IPv6 subnet
-        if (localTraditionalPrefix6 != null) {
-            TrafficSelector selectorV6Trad = DefaultTrafficSelector.builder()
-                    .matchEthType(Ethernet.TYPE_IPV6)
-                    .matchEthDst(frr0Mac)
-                    .matchIPv6Dst(localTraditionalPrefix6)
-                    .build();
-
-            FlowRule flowRuleV6Trad = DefaultFlowRule.builder()
-                    .forDevice(deviceId)
-                    .withSelector(selectorV6Trad)
-                    .withTreatment(treatment)
-                    .withPriority(50)
-                    .fromApp(appId)
-                    .makePermanent()
-                    .build();
-
-            flowRuleService.applyFlowRules(flowRuleV6Trad);
-            log.info(
-                    "Installed virtual gateway IPv6 intercept rule for traditional network on device {} for dstMAC={}, dstIP={}",
-                    deviceId, frr0Mac, localTraditionalPrefix6);
-        }
-    }
-
-    /**
-     * Install per-host flow rule for packets from frr0 to local hosts.
-     * This optimizes subsequent packets by handling them in the data plane.
-     *
-     * Flow rule matches:
-     * - dstMAC = frr0 MAC
-     * - dstIP = specific local host IP
-     *
-     * Actions:
-     * - Rewrite srcMAC to virtualGatewayMac
-     * - Rewrite dstMAC to host MAC
-     * - Forward to host port
-     */
-    private void installFrr0ToLocalHostFlowRule(PacketContext context, Ip4Address dstIp,
-            MacAddress dstMac, ConnectPoint outPoint) {
-        DeviceId deviceId = context.inPacket().receivedFrom().deviceId();
-
-        // Only install flow rule if packet came from and goes to the same device
-        if (!deviceId.equals(outPoint.deviceId())) {
-            log.debug("Not installing flow rule: packet traverses devices {} -> {}",
-                    deviceId, outPoint.deviceId());
-            return;
-        }
-
-        // Selector: dstMAC = frr0 MAC, dstIP = specific host IP
-        TrafficSelector selector = DefaultTrafficSelector.builder()
-                .matchEthType(Ethernet.TYPE_IPV4)
-                .matchEthDst(frr0Mac)
-                .matchIPDst(IpPrefix.valueOf(dstIp, 32))
-                .build();
-
-        // Treatment: rewrite MACs and forward to host port
-        TrafficTreatment treatment = DefaultTrafficTreatment.builder()
-                .setEthSrc(virtualGatewayMac)
-                .setEthDst(dstMac)
-                .setOutput(outPoint.port())
-                .build();
-
-        FlowRule flowRule = DefaultFlowRule.builder()
-                .forDevice(deviceId)
-                .withSelector(selector)
-                .withTreatment(treatment)
-                .withPriority(60) // Higher priority than intercept rule (50) for specific host routing
-                .fromApp(appId)
-                .makeTemporary(30) // 30-second timeout
-                .build();
-
-        flowRuleService.applyFlowRules(flowRule);
-        log.info("Installed per-host flow rule on device {} for dstIP={} -> dstMAC={}, outPort={}",
-                deviceId, dstIp, dstMac, outPoint.port());
     }
 
     /**
