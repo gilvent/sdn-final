@@ -57,6 +57,7 @@ public class VRouterConfig extends Config<ApplicationId> {
     private static final String PEER1_TRADITIONAL_PREFIX6 = "peer1-traditional-prefix6";
     private static final String PEER2_TRADITIONAL_PREFIX6 = "peer2-traditional-prefix6";
     private static final String INGRESS_FILTERS = "ingress-filters";
+    private static final String ARP_INGRESS_FILTERS = "arp-ingress-filters";
 
     @Override
     public boolean isValid() {
@@ -68,7 +69,7 @@ public class VRouterConfig extends Config<ApplicationId> {
                 LOCAL_TRADITIONAL_PREFIX, LOCAL_TRADITIONAL_PREFIX6,
                 PEER1_TRADITIONAL_PREFIX, PEER2_TRADITIONAL_PREFIX,
                 PEER1_TRADITIONAL_PREFIX6, PEER2_TRADITIONAL_PREFIX6,
-                INGRESS_FILTERS);
+                INGRESS_FILTERS, ARP_INGRESS_FILTERS);
     }
 
     /**
@@ -373,6 +374,36 @@ public class VRouterConfig extends Config<ApplicationId> {
         String cpKey = connectPoint.toString();
         if (node.has(INGRESS_FILTERS) && node.get(INGRESS_FILTERS).has(cpKey)) {
             node.get(INGRESS_FILTERS).get(cpKey).forEach(item -> {
+                try {
+                    prefixes.add(IpPrefix.valueOf(item.asText()));
+                } catch (IllegalArgumentException e) {
+                    // Skip invalid prefix
+                }
+            });
+        }
+        return prefixes;
+    }
+
+    /**
+     * Gets the ARP ingress filter allowlist for a specific connect point.
+     * Config format:
+     * "arp-ingress-filters": {
+     *   "of:0000000000000002/4": ["192.168.70.35/32"],
+     *   "of:0000ceaa83f3a445/3": ["192.168.70.35/32"]
+     * }
+     *
+     * @param connectPoint the connect point to get ARP filters for
+     * @return List of allowed IpPrefix for ARP target IPs, or empty list if not configured
+     */
+    public List<IpPrefix> arpIngressFilters(ConnectPoint connectPoint) {
+        List<IpPrefix> prefixes = new ArrayList<>();
+        if (!hasField(ARP_INGRESS_FILTERS)) {
+            return prefixes;
+        }
+
+        String cpKey = connectPoint.toString();
+        if (node.has(ARP_INGRESS_FILTERS) && node.get(ARP_INGRESS_FILTERS).has(cpKey)) {
+            node.get(ARP_INGRESS_FILTERS).get(cpKey).forEach(item -> {
                 try {
                     prefixes.add(IpPrefix.valueOf(item.asText()));
                 } catch (IllegalArgumentException e) {

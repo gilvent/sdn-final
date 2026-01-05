@@ -193,6 +193,8 @@ public class AppComponent {
 
     // Ingress filters: connect point -> list of allowed IP prefixes
     private Map<ConnectPoint, List<IpPrefix>> ingressFilters = new HashMap<>();
+    // ARP ingress filters: connect point -> list of allowed ARP target IP prefixes
+    private Map<ConnectPoint, List<IpPrefix>> arpIngressFilters = new HashMap<>();
 
     private ConsistentMap<Ip4Address, MacAddress> ipToMacTable;
     private ConsistentMap<Ip6Address, MacAddress> ip6ToMacTable;
@@ -373,6 +375,7 @@ public class AppComponent {
 
     private void loadIngressFilters(VRouterConfig config) {
         ingressFilters.clear();
+        arpIngressFilters.clear();
 
         // Load filters for peer VXLAN ports
         if (peer1VxlanCp != null) {
@@ -381,12 +384,22 @@ public class AppComponent {
                 ingressFilters.put(peer1VxlanCp, filters);
                 log.info("Loaded ingress filters for {}: {}", peer1VxlanCp, filters);
             }
+            List<IpPrefix> arpFilters = config.arpIngressFilters(peer1VxlanCp);
+            if (!arpFilters.isEmpty()) {
+                arpIngressFilters.put(peer1VxlanCp, arpFilters);
+                log.info("Loaded ARP ingress filters for {}: {}", peer1VxlanCp, arpFilters);
+            }
         }
         if (peer2VxlanCp != null) {
             List<IpPrefix> filters = config.ingressFilters(peer2VxlanCp);
             if (!filters.isEmpty()) {
                 ingressFilters.put(peer2VxlanCp, filters);
                 log.info("Loaded ingress filters for {}: {}", peer2VxlanCp, filters);
+            }
+            List<IpPrefix> arpFilters = config.arpIngressFilters(peer2VxlanCp);
+            if (!arpFilters.isEmpty()) {
+                arpIngressFilters.put(peer2VxlanCp, arpFilters);
+                log.info("Loaded ARP ingress filters for {}: {}", peer2VxlanCp, arpFilters);
             }
         }
 
@@ -396,6 +409,11 @@ public class AppComponent {
             if (!filters.isEmpty()) {
                 ingressFilters.put(externalPort, filters);
                 log.info("Loaded ingress filters for {}: {}", externalPort, filters);
+            }
+            List<IpPrefix> arpFilters = config.arpIngressFilters(externalPort);
+            if (!arpFilters.isEmpty()) {
+                arpIngressFilters.put(externalPort, arpFilters);
+                log.info("Loaded ARP ingress filters for {}: {}", externalPort, arpFilters);
             }
         }
     }
@@ -407,6 +425,19 @@ public class AppComponent {
         }
         for (IpPrefix prefix : allowedPrefixes) {
             if (prefix.contains(dstIp)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isAllowedArpIngress(ConnectPoint srcPoint, Ip4Address targetIp) {
+        List<IpPrefix> allowedPrefixes = arpIngressFilters.get(srcPoint);
+        if (allowedPrefixes == null || allowedPrefixes.isEmpty()) {
+            return false; // No filter configured means block ARP on filtered ports
+        }
+        for (IpPrefix prefix : allowedPrefixes) {
+            if (prefix.contains(targetIp)) {
                 return true;
             }
         }
@@ -482,18 +513,6 @@ public class AppComponent {
                         return;
                     }
                     log.info("[Ingress Filter] Allowed IPv4 from {}: {} -> {}", srcPoint, srcIp, dstIp);
-                }
-
-                // Handle IPv4 traffic FROM frr0 TO WAN peers (outbound BGP traffic)
-                if (frr0ConnectPoint != null && srcPoint.equals(frr0ConnectPoint) && !wanPeerIp4List.isEmpty()) {
-                    for (Ip4Address peerIp : wanPeerIp4List) {
-                        if (dstIp.equals(peerIp)) {
-                            log.info("Forwarding frr0 IPv4 to WAN peer {}: {} -> {}", peerIp, frr0ConnectPoint,
-                                    externalPort);
-                            packetOut(externalPort, eth);
-                            return;
-                        }
-                    }
                 }
 
                 log.info("[DEBUG] IPv4 Packet from {}: srcIP={}, dstIP={}, srcMAC={}, dstMAC={}",
@@ -795,35 +814,26 @@ public class AppComponent {
 
     private void handleARP(PacketContext context, Ethernet eth) {
         ConnectPoint srcPoint = context.inPacket().receivedFrom();
+        ARP arp = (ARP) eth.getPayload();
+        Ip4Address targetIp = Ip4Address.valueOf(arp.getTargetProtocolAddress());
 
-        // Block ALL ARP from peer VXLAN ports (L3 routing - no ARP needed across VXLAN)
-        if (isPeerVxlanPort(srcPoint)) {
-            return;
-        }
-
-        // Handle ARP packets from WAN port separately
-        if (externalPort != null && srcPoint.equals(externalPort)) {
-            handleWanARP(context, eth);
-            return;
+        // Apply ARP ingress filter for peer VXLAN and WAN ports
+        if (arpIngressFilters.containsKey(srcPoint)) {
+            if (!isAllowedArpIngress(srcPoint, targetIp)) {
+                return;
+            }
+            log.info("[ARP Ingress Filter] Allowed ARP from {} for target {}", srcPoint, targetIp);
         }
 
         MacAddress srcMac = eth.getSourceMAC();
-        ARP arp = (ARP) eth.getPayload();
         Ip4Address srcIp = Ip4Address.valueOf(arp.getSenderProtocolAddress());
-        Ip4Address dstIp = Ip4Address.valueOf(arp.getTargetProtocolAddress());
+        Ip4Address dstIp = targetIp;
 
-        DeviceId deviceId = srcPoint.deviceId();
         PortNumber srcPort = srcPoint.port();
 
         // Learn IP and MAC of sender host
         log.info("[ARP] Learned sender MAC {} from {} (port {})", srcMac, srcIp, srcPort);
         ipToMacTable.put(srcIp, srcMac);
-
-        // Also learn MAC-port mapping in bridgeTable (critical for L3 routing)
-        if (bridgeTable.get(deviceId) == null) {
-            bridgeTable.put(deviceId, new HashMap<>());
-        }
-        bridgeTable.get(deviceId).put(srcMac, srcPort);
 
         if (arp.getOpCode() == ARP.OP_REPLY) {
             MacAddress cachedDstMac = ipToMacTable.asJavaMap().get(dstIp);
@@ -850,17 +860,6 @@ public class AppComponent {
                 return;
             }
 
-            // Check if ARP target is any WAN peer IP - forward to WAN port
-            if (externalPort != null && !wanPeerIp4List.isEmpty()) {
-                for (Ip4Address peerIp : wanPeerIp4List) {
-                    if (dstIp.equals(peerIp)) {
-                        log.info("Forwarding ARP Request for WAN peer {} to WAN port", dstIp);
-                        packetOut(externalPort, eth);
-                        return;
-                    }
-                }
-            }
-
             // Handle ProxyARP
             MacAddress cachedDstMac = ipToMacTable.asJavaMap().get(dstIp);
 
@@ -874,6 +873,8 @@ public class AppComponent {
             } else {
                 log.info("[ProxyARP] ARP TABLE MISS: {}. Send request to edge ports", dstIp);
 
+                // TODO: Search using interfaceService before flooding if necessary
+
                 Iterable<ConnectPoint> edgePoints = edgePortService.getEdgePoints();
 
                 for (ConnectPoint cp : edgePoints) {
@@ -885,53 +886,6 @@ public class AppComponent {
                 }
             }
 
-            return;
-        }
-    }
-
-    /**
-     * Handle ARP packets received from the WAN port (AS65000 side).
-     * - Block ARP not destined to frr0's WAN IP
-     * - Forward ARP replies to frr0
-     * - Send proxy ARP replies for ARP requests targeting frr0's WAN IP
-     */
-    private void handleWanARP(PacketContext context, Ethernet eth) {
-        ARP arp = (ARP) eth.getPayload();
-        Ip4Address srcIp = Ip4Address.valueOf(arp.getSenderProtocolAddress());
-        Ip4Address dstIp = Ip4Address.valueOf(arp.getTargetProtocolAddress());
-        MacAddress srcMac = eth.getSourceMAC();
-        MacAddress dstMac = eth.getDestinationMAC();
-
-        if (arp.getOpCode() == ARP.OP_REPLY) {
-            // Block ARP reply if destination MAC is not frr0's MAC
-            if (frr0Mac == null || !dstMac.equals(frr0Mac)) {
-                log.debug("Blocking WAN ARP Reply not for frr0 MAC: dstMac={}", dstMac);
-                return;
-            }
-
-            // Learn WAN peer's MAC
-            ipToMacTable.put(srcIp, srcMac);
-            log.info("Learned WAN peer MAC: {} -> {}", srcIp, srcMac);
-
-            // Forward ARP reply to frr0 connect point
-            if (frr0ConnectPoint != null) {
-                log.info("Forwarding WAN ARP Reply from {} to frr0 at {}", srcIp, frr0ConnectPoint);
-                packetOut(frr0ConnectPoint, eth);
-            }
-            return;
-        }
-
-        // Block ARP request not destined to frr0's WAN IP
-        if (wanLocalIp4 == null || !dstIp.equals(wanLocalIp4)) {
-            log.debug("Blocking WAN ARP Request not for frr0: dstIp={}", dstIp);
-            return;
-        }
-
-        if (arp.getOpCode() == ARP.OP_REQUEST) {
-            // AS65000 is asking for frr0's WAN IP MAC - send proxy ARP reply
-            log.info("WAN ARP Request for {} from {}. Replying with frr0 MAC {}", dstIp, srcIp, frr0Mac);
-            Ethernet arpReply = buildArpReply(dstIp, frr0Mac, srcIp, srcMac);
-            packetOut(externalPort, arpReply);
             return;
         }
     }
