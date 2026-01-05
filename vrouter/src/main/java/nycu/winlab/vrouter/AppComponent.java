@@ -444,6 +444,35 @@ public class AppComponent {
         return false;
     }
 
+    private boolean isAllowedNdpIngress(ConnectPoint srcPoint, Ip6Address targetIp) {
+        List<IpPrefix> allowedPrefixes = ingressFilters.get(srcPoint);
+        if (allowedPrefixes == null || allowedPrefixes.isEmpty()) {
+            return false; // No filter configured means block NDP on filtered ports
+        }
+        for (IpPrefix prefix : allowedPrefixes) {
+            if (prefix.contains(targetIp)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Extract target IPv6 address from NDP packet (NS or NA).
+     */
+    private Ip6Address extractNdpTargetIp(ICMP6 icmp6) {
+        byte type = icmp6.getIcmpType();
+        if (type == ICMP6.NEIGHBOR_SOLICITATION) {
+            NeighborSolicitation ns = (NeighborSolicitation) icmp6.getPayload();
+            return Ip6Address.valueOf(ns.getTargetAddress());
+        } else if (type == ICMP6.NEIGHBOR_ADVERTISEMENT) {
+            org.onlab.packet.ndp.NeighborAdvertisement na =
+                    (org.onlab.packet.ndp.NeighborAdvertisement) icmp6.getPayload();
+            return Ip6Address.valueOf(na.getTargetAddress());
+        }
+        return null;
+    }
+
     /**
      * Extract MAC address from IPv6 link-local address using EUI-64 format.
      *
@@ -549,40 +578,33 @@ public class AppComponent {
                 Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
                 Ip6Address srcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
 
-                // Handle NDP packets from WAN port separately (before ingress filter)
-                if (externalPort != null && srcPoint.equals(externalPort)) {
-                    if (ipv6.getNextHeader() == IPv6.PROTOCOL_ICMP6) {
-                        ICMP6 icmp6 = (ICMP6) ipv6.getPayload();
-                        byte type = icmp6.getIcmpType();
-                        if (type == ICMP6.NEIGHBOR_SOLICITATION || type == ICMP6.NEIGHBOR_ADVERTISEMENT) {
-                            handleWanNDP(context, eth);
-                            return;
+
+                if (ipv6.getNextHeader() == IPv6.PROTOCOL_ICMP6) {
+                    ICMP6 icmp6 = (ICMP6) ipv6.getPayload();
+                    byte type = icmp6.getIcmpType();
+
+                    if (type == ICMP6.NEIGHBOR_SOLICITATION || type == ICMP6.NEIGHBOR_ADVERTISEMENT) {
+                        
+                        if (ingressFilters.containsKey(srcPoint)) {
+                            // NDP Solicitation are sent to multicast addresses (e.g: ff02::1:ff00:35)
+                            // So we extract the target IP from NDP payload
+                            Ip6Address targetIp = extractNdpTargetIp(icmp6);
+                            if (targetIp == null || !isAllowedNdpIngress(srcPoint, targetIp)) {
+                                return;
+                            }
+                            log.info("[NDP Ingress Filter] Allowed NDP from {} for target {}", srcPoint, targetIp);
                         }
+                        handleNDP(context, eth);
+                        return;
                     }
                 }
 
-                // Apply ingress filter for peer VXLAN and WAN ports (IPv6)
+                // Apply ingress filter for peer VXLAN and WAN ports (non-NDP IPv6)
                 if (ingressFilters.containsKey(srcPoint)) {
                     if (!isAllowedIngress(srcPoint, dstIp)) {
                         return;
                     }
                     log.info("[Ingress Filter] Allowed IPv6 from {}: {} -> {}", srcPoint, srcIp, dstIp);
-                }
-
-                // Handle NDP (Neighbor Solicitation and Advertisement)
-                if (ipv6.getNextHeader() == IPv6.PROTOCOL_ICMP6) {
-                    ICMP6 icmp6 = (ICMP6) ipv6.getPayload();
-                    byte type = icmp6.getIcmpType();
-                    Ip6Address icmpSrcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
-                    Ip6Address icmpDstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
-
-                    log.info("[DEBUG] ICMPv6 from {}: type={}, srcIP={}, dstIP={}, srcMAC={}, dstMAC={}",
-                            srcPoint, type, icmpSrcIp, icmpDstIp, eth.getSourceMAC(), eth.getDestinationMAC());
-
-                    if (type == ICMP6.NEIGHBOR_SOLICITATION || type == ICMP6.NEIGHBOR_ADVERTISEMENT) {
-                        handleNDP(context, eth);
-                        return;
-                    }
                 }
 
                 // TODO: There are actually multiple ip6s for frr. Review if any flow will
@@ -890,85 +912,8 @@ public class AppComponent {
         }
     }
 
-    /**
-     * Handle NDP packets received from the WAN port (AS65000 side).
-     * - Block NDP not destined to frr0's WAN IPv6
-     * - Forward NDP Neighbor Advertisements to frr0
-     * - Send proxy NDP replies for Neighbor Solicitations targeting frr0's WAN IPv6
-     */
-    private void handleWanNDP(PacketContext context, Ethernet eth) {
-        IPv6 ipv6 = (IPv6) eth.getPayload();
-
-        // Verify this is an ICMP6 packet
-        if (ipv6.getNextHeader() != IPv6.PROTOCOL_ICMP6) {
-            return;
-        }
-
-        ICMP6 icmp6 = (ICMP6) ipv6.getPayload();
-        byte type = icmp6.getIcmpType();
-
-        // Only handle NDP packets (NS and NA)
-        if (type != ICMP6.NEIGHBOR_SOLICITATION && type != ICMP6.NEIGHBOR_ADVERTISEMENT) {
-            return;
-        }
-
-        MacAddress srcMac = eth.getSourceMAC();
-        MacAddress dstMac = eth.getDestinationMAC();
-        Ip6Address srcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
-
-        // Handle Neighbor Advertisement (response to our NS)
-        if (type == ICMP6.NEIGHBOR_ADVERTISEMENT) {
-            // Block NA if destination MAC is not frr0's MAC
-            if (frr0Mac == null || !dstMac.equals(frr0Mac)) {
-                log.debug("Blocking WAN Neighbor Advertisement not for frr0 MAC: dstMac={}", dstMac);
-                return;
-            }
-
-            // Learn WAN peer's IPv6 and MAC
-            ip6ToMacTable.put(srcIp, srcMac);
-            log.info("Learned WAN peer IPv6 MAC: {} -> {}", srcIp, srcMac);
-
-            // Forward NA to frr0 connect point
-            if (frr0ConnectPoint != null) {
-                log.info("Forwarding WAN Neighbor Advertisement to frr0 at {}", frr0ConnectPoint);
-                packetOut(frr0ConnectPoint, eth);
-            }
-            return;
-        }
-
-        // Handle Neighbor Solicitation (request from AS65000)
-        if (type == ICMP6.NEIGHBOR_SOLICITATION) {
-            NeighborSolicitation ns = (NeighborSolicitation) icmp6.getPayload();
-            byte[] targetBytes = ns.getTargetAddress();
-            Ip6Address targetIp = Ip6Address.valueOf(targetBytes);
-
-            // Block NS not destined to frr0's WAN IPv6
-            if (wanLocalIp6 == null || !targetIp.equals(wanLocalIp6)) {
-                log.debug("Blocking WAN Neighbor Solicitation not for frr0: targetIp={}", targetIp);
-                return;
-            }
-
-            // AS65000 is asking for frr0's WAN IPv6 MAC - send proxy NDP reply
-            log.info("WAN Neighbor Solicitation for {}. Replying with frr0 MAC {}", targetIp, frr0Mac);
-
-            // Learn the WAN peer's IPv6 and MAC from the NS
-            ip6ToMacTable.put(srcIp, srcMac);
-            log.info("Learned WAN peer IPv6 MAC from NS: {} -> {}", srcIp, srcMac);
-
-            Ethernet ndpReply = NeighborAdvertisement2.buildNdpAdv(targetIp, frr0Mac, eth);
-            packetOut(externalPort, ndpReply);
-            return;
-        }
-    }
-
     private void handleNDP(PacketContext context, Ethernet eth) {
         ConnectPoint srcPoint = context.inPacket().receivedFrom();
-
-        // Block ALL NDP from peer VXLAN ports (L3 routing - no NDP needed across VXLAN)
-        if (isPeerVxlanPort(srcPoint)) {
-            return;
-        }
-
         MacAddress srcMac = eth.getSourceMAC();
         IPv6 ipv6 = (IPv6) eth.getPayload();
         Ip6Address srcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
