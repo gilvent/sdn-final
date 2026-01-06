@@ -618,10 +618,7 @@ public class AppComponent {
                                 eth.getDestinationMAC(), dstIpV6);
                         routeToLocalSubnetV6(context, eth);
                         return;
-                    }
-
-                    // Packets to local traditional prefix -> route via L3 (frr0)
-                    if (localTraditionalPrefix6 != null && localTraditionalPrefix6.contains(dstIpV6)) {
+                    } else {
                         log.info("[Gateway] Handle Inter-AS IPv6 to external network: dstMAC={}, dstIP={}",
                                 eth.getDestinationMAC(), dstIpV6);
                         handleL3RoutingIPv6(context, eth);
