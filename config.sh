@@ -102,3 +102,6 @@ dexec h1 ip -6 route replace default via 2a0b:4e07:c4:${NETWORK_ID}::69
 dexec frr0 ip -6 addr add fd63::1/64 dev eth0
 dexec frr0 ip -6 addr add fd70::${NETWORK_ID}/64 dev eth0
 dexec frr0 ip -6 addr add 2a0b:4e07:c4:${NETWORK_ID}::69/64 dev eth0
+
+# Set MAC address on frr0's eth0 (same as IPv4, ensures consistency for vrouter ONOS app)
+dexec frr0 ip link set eth0 address 00:00:00:00:${NETWORK_ID}:01

@@ -83,10 +83,13 @@ import org.osgi.service.component.annotations.Reference;
 import org.osgi.service.component.annotations.ReferenceCardinality;
 import org.onosproject.routeservice.ResolvedRoute;
 import org.onosproject.routeservice.RouteService;
+import org.onosproject.net.link.LinkService;
+import org.onosproject.net.topology.TopologyService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
+import java.util.Set;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -140,7 +143,16 @@ public class AppComponent {
     @Reference(cardinality = ReferenceCardinality.MANDATORY)
     protected IntentService intentService;
 
+    @Reference(cardinality = ReferenceCardinality.MANDATORY)
+    protected LinkService linkService;
+
+    @Reference(cardinality = ReferenceCardinality.MANDATORY)
+    protected TopologyService topologyService;
+
     private final InternalConfigListener configListener = new InternalConfigListener();
+
+    // Flag to track if peer intents have been successfully installed
+    private volatile boolean peersIntentsInstalled = false;
     private final ConfigFactory<ApplicationId, VRouterConfig> configFactory = new ConfigFactory<ApplicationId, VRouterConfig>(
             SubjectFactories.APP_SUBJECT_FACTORY,
             VRouterConfig.class,
@@ -453,8 +465,8 @@ public class AppComponent {
             NeighborSolicitation ns = (NeighborSolicitation) icmp6.getPayload();
             return Ip6Address.valueOf(ns.getTargetAddress());
         } else if (type == ICMP6.NEIGHBOR_ADVERTISEMENT) {
-            org.onlab.packet.ndp.NeighborAdvertisement na =
-                    (org.onlab.packet.ndp.NeighborAdvertisement) icmp6.getPayload();
+            org.onlab.packet.ndp.NeighborAdvertisement na = (org.onlab.packet.ndp.NeighborAdvertisement) icmp6
+                    .getPayload();
             return Ip6Address.valueOf(na.getTargetAddress());
         }
         return null;
@@ -746,11 +758,6 @@ public class AppComponent {
         return eth;
     }
 
-    /**
-     * Send an NDP Neighbor Solicitation to discover a local host's MAC address.
-     * Floods NDP solicitation to all edge ports except peer VXLAN and external
-     * ports.
-     */
     private void sendNdpSolicitation(Ip6Address targetIp) {
         if (virtualGatewayIp6 == null) {
             log.warn("[Gateway] Cannot send NDP solicitation: virtualGatewayIp6 not configured");
@@ -763,14 +770,6 @@ public class AppComponent {
 
         Iterable<ConnectPoint> edgePoints = edgePortService.getEdgePoints();
         for (ConnectPoint cp : edgePoints) {
-            // Skip peer VXLAN ports - no NDP needed across VXLAN
-            if (isPeerVxlanPort(cp)) {
-                continue;
-            }
-            // Skip external WAN port
-            if (externalPort != null && cp.equals(externalPort)) {
-                continue;
-            }
             packetOut(cp, ndpSolicitation);
         }
     }
@@ -936,6 +935,12 @@ public class AppComponent {
             Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
             MacAddress dstMac = eth.getDestinationMAC();
 
+            if (virtualGatewayIp6 != null && dstIp.equals(virtualGatewayIp6)) {
+                log.info("NDP Advertisement destined to virtual gateway IP {}.",
+                        virtualGatewayIp6);
+                return;
+            }
+
             // Find requester's location using Ethernet destination MAC
             ConnectPoint dstHostPoint = findHostEdgePoint(dstMac);
             if (dstHostPoint == null) {
@@ -946,10 +951,21 @@ public class AppComponent {
             log.info("[NDP Advertisement] srcIP={}, dstIP={}, dstMAC={}", srcIp, dstIp, dstMac);
 
             if (dstHostPoint != null) {
-                log.info("Forwarding NDP Advertisement to requester at {}", dstHostPoint);
+                log.info("[NDP Advertisement] Forwarding to NS requester at {}", dstHostPoint);
                 packetOut(dstHostPoint, eth);
             } else {
-                log.warn("Cannot find requester location for NDP Advertisement: dstMAC={}", dstMac);
+                log.warn("[NDP Advertisement]Cannot find requester location for dstMAC={}. Flood to edge ports",
+                        dstMac);
+                Iterable<ConnectPoint> edgePoints = edgePortService.getEdgePoints();
+
+                for (ConnectPoint cp : edgePoints) {
+                    if (cp.equals(srcPoint)) {
+                        continue;
+                    }
+
+                    packetOut(cp, eth);
+                }
+                return;
             }
 
             return;
@@ -962,17 +978,7 @@ public class AppComponent {
 
             // For DAD packets, do NOT send proxy reply - just flood to let DAD complete
             if (isDadPacket) {
-                log.info("DAD Neighbor Solicitation for {}. Flooding to edge ports.", targetIp);
-
-                Iterable<ConnectPoint> edgePoints = edgePortService.getEdgePoints();
-
-                for (ConnectPoint cp : edgePoints) {
-                    if (cp.equals(srcPoint)) {
-                        continue;
-                    }
-
-                    packetOut(cp, eth);
-                }
+                log.info("DAD Neighbor Solicitation for {}. Drop.", targetIp);
                 return;
             }
 
@@ -1174,25 +1180,34 @@ public class AppComponent {
         }
 
         // Determine the destination MAC based on the next hop
-        MacAddress dstMac = null;
         Ip6Address nextHopIp6 = nextHop.getIp6Address();
-
-        // Handle link-local next-hops (fe80::) - derive MAC from EUI-64
+        
         if (nextHopIp6.isLinkLocal()) {
-            dstMac = macFromLinkLocal(nextHopIp6);
-            log.info("[Gateway] L3 IPv6: Next-hop {} is link-local. Derived MAC: {}",
-                    nextHopIp6, dstMac);
-        } else {
-            dstMac = ip6ToMacTable.asJavaMap().get(nextHopIp6);
+            log.info("[Gateway] L3 IPv6: Next-hop {} is link-local.",
+                    nextHopIp6);
+        }
+
+        // Use HostService to resolve next-hop MAC (more reliable for link-local addresses)
+        MacAddress dstMac = null;
+        Set<Host> hosts = hostService.getHostsByIp(nextHopIp6);
+        if (!hosts.isEmpty()) {
+            dstMac = hosts.iterator().next().mac();
+            log.info("[Gateway] L3 IPv6: Resolved next-hop {} MAC via HostService: {}", nextHopIp6, dstMac);
         }
 
         if (dstMac == null) {
-            log.info("[Gateway] L3 IPv6: Next-hop MAC not found. Forward to default frr0 router (MAC={})",
-                    frr0Mac);
-            routePacketV6(context, eth, frr0Mac, frr0ConnectPoint);
-            return;
+            dstMac = ip6ToMacTable.asJavaMap().get(nextHopIp6);
+            if (dstMac != null) {
+                log.info("[Gateway] L3 IPv6: Resolved next-hop {} MAC via ip6ToMacTable: {}", nextHopIp6, dstMac);
+            }
         }
 
+        if (dstMac == null) {
+            log.warn("[Gateway] L3 IPv6: MAC for next-hop {} not found. Dropping",
+                    nextHopIp6);
+            return;
+        }
+    
         log.info("[Gateway] L3 IPv6: Found NEXT-HOP MAC {}.", dstMac);
         ConnectPoint outPoint = findIp6NextHopOutput(eth, nextHopIp6);
 
@@ -1537,7 +1552,6 @@ public class AppComponent {
 
         return map;
     }
-
 
     private void installV4PeersIntents() {
         if (v4Peers == null || v4Peers.isEmpty()) {

@@ -80,6 +80,14 @@ frr1-rec-routes:
 	@echo "\n=== From frr0 (IPv4) ===" && docker exec frr1 vtysh -c "show ip bgp nei 192.168.63.1 routes"
 	@echo "\n=== From frr0 (IPv6) ===" && docker exec frr1 vtysh -c "show bgp ipv6 nei fd63::1 routes"
 
+onos-resolved-routes:
+	@echo "--- 📊 ONOS Resolved Routes ---"
+	docker exec -it onos /root/onos/apache-karaf-4.2.14/bin/client routes
+
+onos-hosts:
+	@echo "--- 📊 ONOS Hosts ---"
+	docker exec -it onos /root/onos/apache-karaf-4.2.14/bin/client hosts
+
 # Ensure the directory exists
 $(FINAL_DIR):
 	@mkdir -p $(FINAL_DIR)
