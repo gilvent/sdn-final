@@ -151,8 +151,6 @@ public class AppComponent {
 
     private final InternalConfigListener configListener = new InternalConfigListener();
 
-    // Flag to track if peer intents have been successfully installed
-    private volatile boolean peersIntentsInstalled = false;
     private final ConfigFactory<ApplicationId, VRouterConfig> configFactory = new ConfigFactory<ApplicationId, VRouterConfig>(
             SubjectFactories.APP_SUBJECT_FACTORY,
             VRouterConfig.class,
@@ -177,25 +175,14 @@ public class AppComponent {
     private ConnectPoint externalPort;
 
     // WAN peering configuration
-    private Ip4Address wanLocalIp4; // 192.168.70.35
-    private List<Ip4Address> wanPeerIp4List = new ArrayList<>(); // BGP peer IPs (AS65000, AS65340, AS65360)
     private ConnectPoint frr0ConnectPoint;
     private ConnectPoint frr1ConnectPoint;
-
-    // WAN IPv6 peering configuration
-    private Ip6Address wanLocalIp6; // fd70::35
 
     // Peer VXLAN configuration (for peer network communication)
     private ConnectPoint peer1VxlanCp;
     private ConnectPoint peer2VxlanCp;
-    private IpPrefix peer1SdnPrefix;
-    private IpPrefix peer2SdnPrefix;
     private IpPrefix localSdnPrefix;
-    private IpPrefix peer1SdnPrefix6;
-    private IpPrefix peer2SdnPrefix6;
     private IpPrefix localSdnPrefix6;
-    private IpPrefix localTraditionalPrefix;
-    private IpPrefix localTraditionalPrefix6;
     private IpPrefix peer1TraditionalPrefix;
     private IpPrefix peer2TraditionalPrefix;
     private IpPrefix peer1TraditionalPrefix6;
@@ -311,18 +298,10 @@ public class AppComponent {
             // Load peer VXLAN configuration
             peer1VxlanCp = config.peer1VxlanCp();
             peer2VxlanCp = config.peer2VxlanCp();
-            peer1SdnPrefix = config.peer1SdnPrefix();
-            peer2SdnPrefix = config.peer2SdnPrefix();
             localSdnPrefix = config.localSdnPrefix();
 
             // Load peer IPv6 SDN prefixes
-            peer1SdnPrefix6 = config.peer1SdnPrefix6();
-            peer2SdnPrefix6 = config.peer2SdnPrefix6();
             localSdnPrefix6 = config.localSdnPrefix6();
-
-            // Load local traditional network prefix
-            localTraditionalPrefix = config.localTraditionalPrefix();
-            localTraditionalPrefix6 = config.localTraditionalPrefix6();
 
             // Load peer traditional prefixes
             peer1TraditionalPrefix = config.peer1TraditionalPrefix();
@@ -470,34 +449,6 @@ public class AppComponent {
             return Ip6Address.valueOf(na.getTargetAddress());
         }
         return null;
-    }
-
-    /**
-     * Extract MAC address from IPv6 link-local address using EUI-64 format.
-     *
-     * EUI-64 embeds MAC in the interface identifier (last 64 bits) with:
-     * - ff:fe inserted in the middle of the MAC
-     * - 7th bit (U/L bit) of the first byte inverted
-     *
-     * Example: fe80::b8a7:aeff:fee3:48af → BA:A7:AE:E3:48:AF
-     * b8 XOR 02 = ba (invert U/L bit)
-     *
-     * @param linkLocal IPv6 link-local address
-     * @return MAC address extracted from the link-local address
-     */
-    private MacAddress macFromLinkLocal(Ip6Address linkLocal) {
-        byte[] addr = linkLocal.toOctets(); // 16 bytes
-        // Interface ID is bytes 8-15 (last 64 bits)
-        // EUI-64 format: [8][9][10]:ff:fe:[13][14][15] with bit 7 inverted in byte[8]
-        byte[] mac = new byte[6];
-        mac[0] = (byte) (addr[8] ^ 0x02); // Invert U/L bit (7th bit)
-        mac[1] = addr[9];
-        mac[2] = addr[10];
-        // Skip addr[11]=0xff, addr[12]=0xfe (EUI-64 insertion)
-        mac[3] = addr[13];
-        mac[4] = addr[14];
-        mac[5] = addr[15];
-        return MacAddress.valueOf(mac);
     }
 
     private class VRouterPacketProcessor implements PacketProcessor {
@@ -878,8 +829,6 @@ public class AppComponent {
             } else {
                 log.info("[ProxyARP] ARP TABLE MISS: {}. Send request to edge ports", dstIp);
 
-                // TODO: Search using interfaceService before flooding if necessary
-
                 Iterable<ConnectPoint> edgePoints = edgePortService.getEdgePoints();
 
                 for (ConnectPoint cp : edgePoints) {
@@ -1023,12 +972,6 @@ public class AppComponent {
         }
     }
 
-    /**
-     * Handle packets intercepted by virtual gateway interception rule.
-     * These are packets from AS65351 (via frr0) destined to local hosts with:
-     * 
-     * - dstIP = local host IP (in 172.16.35.0/24, but not frr0's IP)
-     */
     private void routeToLocalSubnet(PacketContext context, Ethernet eth) {
         IPv4 ipv4 = (IPv4) eth.getPayload();
         Ip4Address dstIp = Ip4Address.valueOf(ipv4.getDestinationAddress());
@@ -1063,10 +1006,6 @@ public class AppComponent {
         routePacket(context, eth, dstMac, outPoint);
     }
 
-    /**
-     * Handle IPv6 packets intercepted by virtual gateway interception rule.
-     * - dstMAC = frr0 MAC
-     */
     private void routeToLocalSubnetV6(PacketContext context, Ethernet eth) {
         IPv6 ipv6 = (IPv6) eth.getPayload();
         Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());

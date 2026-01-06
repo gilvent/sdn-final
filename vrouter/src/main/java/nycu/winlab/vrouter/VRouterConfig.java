@@ -183,26 +183,6 @@ public class VRouterConfig extends Config<ApplicationId> {
     }
 
     /**
-     * Gets the peer 1 SDN network prefix.
-     *
-     * @return IpPrefix or null if not configured
-     */
-    public IpPrefix peer1SdnPrefix() {
-        String prefix = get(PEER1_SDN_PREFIX, null);
-        return prefix != null ? IpPrefix.valueOf(prefix) : null;
-    }
-
-    /**
-     * Gets the peer 2 SDN network prefix.
-     *
-     * @return IpPrefix or null if not configured
-     */
-    public IpPrefix peer2SdnPrefix() {
-        String prefix = get(PEER2_SDN_PREFIX, null);
-        return prefix != null ? IpPrefix.valueOf(prefix) : null;
-    }
-
-    /**
      * Gets the local SDN network prefix.
      *
      * @return IpPrefix or null if not configured
@@ -212,25 +192,6 @@ public class VRouterConfig extends Config<ApplicationId> {
         return prefix != null ? IpPrefix.valueOf(prefix) : null;
     }
 
-    /**
-     * Gets the peer 1 SDN IPv6 network prefix.
-     *
-     * @return IpPrefix or null if not configured
-     */
-    public IpPrefix peer1SdnPrefix6() {
-        String prefix = get(PEER1_SDN_PREFIX6, null);
-        return prefix != null ? IpPrefix.valueOf(prefix) : null;
-    }
-
-    /**
-     * Gets the peer 2 SDN IPv6 network prefix.
-     *
-     * @return IpPrefix or null if not configured
-     */
-    public IpPrefix peer2SdnPrefix6() {
-        String prefix = get(PEER2_SDN_PREFIX6, null);
-        return prefix != null ? IpPrefix.valueOf(prefix) : null;
-    }
 
     /**
      * Gets the local SDN IPv6 network prefix.
@@ -239,26 +200,6 @@ public class VRouterConfig extends Config<ApplicationId> {
      */
     public IpPrefix localSdnPrefix6() {
         String prefix = get(LOCAL_SDN_PREFIX6, null);
-        return prefix != null ? IpPrefix.valueOf(prefix) : null;
-    }
-
-    /**
-     * Gets the local traditional network prefix (e.g., 172.17.35.0/24).
-     *
-     * @return IpPrefix or null if not configured
-     */
-    public IpPrefix localTraditionalPrefix() {
-        String prefix = get(LOCAL_TRADITIONAL_PREFIX, null);
-        return prefix != null ? IpPrefix.valueOf(prefix) : null;
-    }
-
-    /**
-     * Gets the local traditional IPv6 network prefix (e.g., 2a0b:4e07:c4:135::/64).
-     *
-     * @return IpPrefix or null if not configured
-     */
-    public IpPrefix localTraditionalPrefix6() {
-        String prefix = get(LOCAL_TRADITIONAL_PREFIX6, null);
         return prefix != null ? IpPrefix.valueOf(prefix) : null;
     }
 
