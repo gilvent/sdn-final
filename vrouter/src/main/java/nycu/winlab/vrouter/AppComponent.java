@@ -293,25 +293,8 @@ public class AppComponent {
             frr1ConnectPoint = config.frr1ConnectPoint();
             log.info("Loaded VRouter config: gateway-ip4={}, gateway-ip6={}, gateway-mac={}",
                     virtualGatewayIp4, virtualGatewayIp6, virtualGatewayMac);
-            log.info("Loaded Quagga config: frr0-mac={}, frr0-ip4={}, frr0-ip6={}",
+            log.info("Loaded FRR config: frr0-mac={}, frr0-ip4={}, frr0-ip6={}",
                     frr0Mac, frr0Ip4, frr0Ip6);
-            log.info("Loaded external port config: wan-connect-point={}", externalPort);
-            log.info("Loaded frr0 connect point: {}", frr0ConnectPoint);
-            log.info("Loaded frr1 connect point: {}", frr1ConnectPoint);
-
-            // Parse v4-peer to get WAN local, WAN peers, and internal peers
-            v4Peers = config.v4Peers();
-            if (v4Peers != null && !v4Peers.isEmpty()) {
-                installV4PeersIntents();
-            }
-
-            // Parse v6-peer to get WAN IPv6 and internal peer addresses
-            v6Peers = config.v6Peers();
-            if (v6Peers != null && !v6Peers.isEmpty()) {
-                installV6PeersIntents();
-            }
-
-            installFrrToFpmFlowRules();
 
             // Load peer VXLAN configuration
             peer1VxlanCp = config.peer1VxlanCp();
@@ -319,34 +302,38 @@ public class AppComponent {
             peer1SdnPrefix = config.peer1SdnPrefix();
             peer2SdnPrefix = config.peer2SdnPrefix();
             localSdnPrefix = config.localSdnPrefix();
-            log.info("Loaded peer VXLAN config: peer1-cp={}, peer2-cp={}", peer1VxlanCp, peer2VxlanCp);
-            log.info("Loaded peer SDN prefixes: peer1={}, peer2={}, local={}",
-                    peer1SdnPrefix, peer2SdnPrefix, localSdnPrefix);
 
             // Load peer IPv6 SDN prefixes
             peer1SdnPrefix6 = config.peer1SdnPrefix6();
             peer2SdnPrefix6 = config.peer2SdnPrefix6();
             localSdnPrefix6 = config.localSdnPrefix6();
-            log.info("Loaded peer IPv6 SDN prefixes: peer1={}, peer2={}, local={}",
-                    peer1SdnPrefix6, peer2SdnPrefix6, localSdnPrefix6);
 
             // Load local traditional network prefix
             localTraditionalPrefix = config.localTraditionalPrefix();
             localTraditionalPrefix6 = config.localTraditionalPrefix6();
-            log.info("Loaded local traditional prefix: {}, IPv6: {}", localTraditionalPrefix, localTraditionalPrefix6);
 
             // Load peer traditional prefixes
             peer1TraditionalPrefix = config.peer1TraditionalPrefix();
             peer2TraditionalPrefix = config.peer2TraditionalPrefix();
             peer1TraditionalPrefix6 = config.peer1TraditionalPrefix6();
             peer2TraditionalPrefix6 = config.peer2TraditionalPrefix6();
-            log.info("Loaded peer traditional prefixes: peer1={}, peer2={}", peer1TraditionalPrefix,
-                    peer2TraditionalPrefix);
-            log.info("Loaded peer traditional IPv6 prefixes: peer1={}, peer2={}", peer1TraditionalPrefix6,
-                    peer2TraditionalPrefix6);
+
+            // BGP peers IP
+            v4Peers = config.v4Peers();
+            v6Peers = config.v6Peers();
+
+            installFrrToFpmFlowRules();
 
             // Load ingress filters
             loadIngressFilters(config);
+            
+            if (v4Peers != null && !v4Peers.isEmpty()) {
+                installV4PeersIntents();
+            }
+            
+            if (v6Peers != null && !v6Peers.isEmpty()) {
+                installV6PeersIntents();
+            }
 
             installVirtualGatewayInterceptRule();
         }
@@ -1210,7 +1197,7 @@ public class AppComponent {
         ConnectPoint outPoint = findIp6NextHopOutput(eth, nextHopIp6);
 
         if (outPoint == null) {
-            log.warn("[Gateway] L3 IPv6: Cannot find output interfacce for nextHop {}. Drop packet.", nextHopIp6);
+            log.warn("[Gateway] L3 IPv6: Cannot find output interface for nextHop {}. Drop packet.", nextHopIp6);
             return;
         }
 
@@ -1515,13 +1502,43 @@ public class AppComponent {
     }
 
     /**
-     * Install PointToPointIntents for IPv4 BGP peers exchange.
-     * Uses interfaceService to dynamically determine connect points based on peer
-     * IPs:
-     * AS65xx0 <-> (AS65yy0 / AS65zz0) through peer VXLAN interface
-     * AS65xx0 <-> AS65000 through WAN interface
-     * AS65xx0 <-> AS65xx1 through frr1 interface
+     * Build a mapping from peer IPs to their configured connect points.
+     * This avoids race conditions with InterfaceService by using explicitly
+     * configured values from VRouterConfig.
      */
+    private Map<IpAddress, ConnectPoint> buildPeerIpToConnectPointMap() {
+        Map<IpAddress, ConnectPoint> map = new HashMap<>();
+
+        // Map peer VXLAN IPs to their connect points
+        if (peer1VxlanCp != null) {
+            // peer1 uses 192.168.70.34 (IPv4) and fd70::34 (IPv6)
+            map.put(IpAddress.valueOf("192.168.70.34"), peer1VxlanCp);
+            map.put(IpAddress.valueOf("fd70::34"), peer1VxlanCp);
+        }
+        if (peer2VxlanCp != null) {
+            // peer2 uses 192.168.70.36 (IPv4) and fd70::36 (IPv6)
+            map.put(IpAddress.valueOf("192.168.70.36"), peer2VxlanCp);
+            map.put(IpAddress.valueOf("fd70::36"), peer2VxlanCp);
+        }
+
+        // Map WAN/external IPs to external port
+        if (externalPort != null) {
+            // AS65000 transit uses 192.168.70.253 (IPv4) and fd70::fe (IPv6)
+            map.put(IpAddress.valueOf("192.168.70.253"), externalPort);
+            map.put(IpAddress.valueOf("fd70::fe"), externalPort);
+        }
+
+        // Map frr1 (internal iBGP peer) to frr1 connect point
+        if (frr1ConnectPoint != null) {
+            // frr1 uses 192.168.63.2 (IPv4) and fd63::2 (IPv6)
+            map.put(IpAddress.valueOf("192.168.63.2"), frr1ConnectPoint);
+            map.put(IpAddress.valueOf("fd63::2"), frr1ConnectPoint);
+        }
+
+        return map;
+    }
+
+
     private void installV4PeersIntents() {
         if (v4Peers == null || v4Peers.isEmpty()) {
             log.info("No v4-peers configured for intent installation");
@@ -1533,28 +1550,23 @@ public class AppComponent {
             return;
         }
 
-        log.info("Available interfaces from InterfaceService:");
-        for (Interface intf : interfaceService.getInterfaces()) {
-            log.info("  Interface: {} at {} with IPs: {}", intf.name(), intf.connectPoint(), intf.ipAddressesList());
-        }
+        // Build mapping from peer IPs to connect points using explicit config
+        Map<IpAddress, ConnectPoint> peerIpToCp = buildPeerIpToConnectPointMap();
+        log.info("Peer IP to ConnectPoint mapping: {}", peerIpToCp);
+
         int installedCount = 0;
         for (String[] peer : v4Peers) {
             Ip4Address localIp = Ip4Address.valueOf(peer[0]);
             Ip4Address peerIp = Ip4Address.valueOf(peer[1]);
 
-            // Find connect points using interfaceService
-            Interface localIntf = interfaceService.getMatchingInterface(localIp);
-            Interface peerIntf = interfaceService.getMatchingInterface(peerIp);
+            // Use explicit mapping instead of InterfaceService lookup
+            ConnectPoint localCp = frr0ConnectPoint; // Local IPs always come from frr0
+            ConnectPoint peerCp = peerIpToCp.get(peerIp);
 
-            log.info("v4-peer lookup: local={} (intf={}), peer={} (intf={})", localIp,
-                    localIntf != null ? localIntf.name() : "null", peerIp, peerIntf != null ? peerIntf.name() : "null");
-
-            // Determine connect points - fallback to frr0ConnectPoint for local IPs
-            ConnectPoint localCp = (localIntf != null) ? localIntf.connectPoint() : frr0ConnectPoint;
-            ConnectPoint peerCp = (peerIntf != null) ? peerIntf.connectPoint() : null;
+            log.info("v4-peer: local={} (cp={}), peer={} (cp={})", localIp, localCp, peerIp, peerCp);
 
             if (peerCp == null) {
-                log.warn("No interface found for peer IP {}, skipping", peerIp);
+                log.warn("No connect point configured for peer IP {}, skipping", peerIp);
                 continue;
             }
 
@@ -1601,9 +1613,9 @@ public class AppComponent {
     }
 
     /**
-     * Install PointToPointIntents for IPv4 BGP peers exchange.
-     * Uses interfaceService to dynamically determine connect points based on peer
-     * IPs:
+     * Install PointToPointIntents for IPv6 BGP peers exchange.
+     * Uses explicitly configured connect points to avoid race conditions
+     * with InterfaceService:
      * AS65xx0 <-> (AS65yy0 / AS65zz0) through peer VXLAN interface
      * AS65xx0 <-> AS65000 through WAN interface
      * AS65xx0 <-> AS65xx1 through frr1 interface
@@ -1619,28 +1631,22 @@ public class AppComponent {
             return;
         }
 
-        log.info("Available interfaces from InterfaceService:");
-        for (Interface intf : interfaceService.getInterfaces()) {
-            log.info("  Interface: {} at {} with IPs: {}", intf.name(), intf.connectPoint(), intf.ipAddressesList());
-        }
+        // Build mapping from peer IPs to connect points using explicit config
+        Map<IpAddress, ConnectPoint> peerIpToCp = buildPeerIpToConnectPointMap();
+
         int installedCount = 0;
         for (String[] peer : v6Peers) {
             Ip6Address localIp = Ip6Address.valueOf(peer[0]);
             Ip6Address peerIp = Ip6Address.valueOf(peer[1]);
 
-            // Find connect points using interfaceService
-            Interface localIntf = interfaceService.getMatchingInterface(localIp);
-            Interface peerIntf = interfaceService.getMatchingInterface(peerIp);
+            // Use explicit mapping instead of InterfaceService lookup
+            ConnectPoint localCp = frr0ConnectPoint; // Local IPs always come from frr0
+            ConnectPoint peerCp = peerIpToCp.get(peerIp);
 
-            log.info("v6-peer lookup: local={} (intf={}), peer={} (intf={})", localIp,
-                    localIntf != null ? localIntf.name() : "null", peerIp, peerIntf != null ? peerIntf.name() : "null");
-
-            // Determine connect points - fallback to frr0ConnectPoint for local IPs
-            ConnectPoint localCp = (localIntf != null) ? localIntf.connectPoint() : frr0ConnectPoint;
-            ConnectPoint peerCp = (peerIntf != null) ? peerIntf.connectPoint() : null;
+            log.info("v6-peer: local={} (cp={}), peer={} (cp={})", localIp, localCp, peerIp, peerCp);
 
             if (peerCp == null) {
-                log.warn("No interface found for peer IP {}, skipping", peerIp);
+                log.warn("No connect point configured for peer IP {}, skipping", peerIp);
                 continue;
             }
 
