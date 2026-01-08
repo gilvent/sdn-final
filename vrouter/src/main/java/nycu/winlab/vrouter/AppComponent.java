@@ -181,6 +181,11 @@ public class AppComponent {
     // Peer VXLAN configuration (for peer network communication)
     private ConnectPoint peer1VxlanCp;
     private ConnectPoint peer2VxlanCp;
+
+    // Anycast configuration
+    private Ip4Address anycastIp;
+    private ConnectPoint anycast1ConnectPoint; // on ovs1
+    private ConnectPoint anycast2ConnectPoint; // on ovs2
     private IpPrefix localSdnPrefix;
     private IpPrefix localSdnPrefix6;
     private IpPrefix peer1TraditionalPrefix;
@@ -313,15 +318,22 @@ public class AppComponent {
             v4Peers = config.v4Peers();
             v6Peers = config.v6Peers();
 
+            // Load anycast configuration
+            anycastIp = config.anycastIp();
+            anycast1ConnectPoint = config.anycast1ConnectPoint();
+            anycast2ConnectPoint = config.anycast2ConnectPoint();
+            log.info("Loaded anycast config: ip={}, anycast1={}, anycast2={}",
+                    anycastIp, anycast1ConnectPoint, anycast2ConnectPoint);
+
             installFrrToFpmFlowRules();
 
             // Load ingress filters
             loadIngressFilters(config);
-            
+
             if (v4Peers != null && !v4Peers.isEmpty()) {
                 installV4PeersIntents();
             }
-            
+
             if (v6Peers != null && !v6Peers.isEmpty()) {
                 installV6PeersIntents();
             }
@@ -497,6 +509,12 @@ public class AppComponent {
                 log.info("[DEBUG] IPv4 Packet from {}: srcIP={}, dstIP={}, srcMAC={}, dstMAC={}",
                         srcPoint, srcIp, dstIp, eth.getSourceMAC(), eth.getDestinationMAC());
 
+                if (isAnycastIp(dstIp)) {
+                    ConnectPoint ingressCP = context.inPacket().receivedFrom();
+                    handleAnycastRouting(context, eth, ingressCP);
+                    return;
+                }
+
                 // BGP IPv4 are all handled with flow rules
                 // All other IPv4 packets to frr0Mac are assumed for gateway routing
                 if (frr0Mac != null && eth.getDestinationMAC().equals(frr0Mac)) {
@@ -528,13 +546,12 @@ public class AppComponent {
                 Ip6Address dstIp = Ip6Address.valueOf(ipv6.getDestinationAddress());
                 Ip6Address srcIp = Ip6Address.valueOf(ipv6.getSourceAddress());
 
-
                 if (ipv6.getNextHeader() == IPv6.PROTOCOL_ICMP6) {
                     ICMP6 icmp6 = (ICMP6) ipv6.getPayload();
                     byte type = icmp6.getIcmpType();
 
                     if (type == ICMP6.NEIGHBOR_SOLICITATION || type == ICMP6.NEIGHBOR_ADVERTISEMENT) {
-                        
+
                         if (ingressFilters.containsKey(srcPoint)) {
                             // NDP Solicitation are sent to multicast addresses (e.g: ff02::1:ff00:35)
                             // So we extract the target IP from NDP payload
@@ -816,6 +833,23 @@ public class AppComponent {
                 return;
             }
 
+            // Special handling for ARP to anycast server
+            if (isAnycastIp(dstIp)) {
+                ConnectPoint nearestServer = selectNearestAnycastServer(srcPoint);
+
+                if (nearestServer != null) {
+                    MacAddress serverMac = getAnycastServerMac(nearestServer);
+                    if (serverMac != null) {
+                        log.info("Anycast ARP REQUEST for {}. Ingress={}, Replying with MAC {}",
+                                dstIp, srcPoint, serverMac);
+                        Ethernet arpPkt = buildArpReply(dstIp, serverMac, srcIp, srcMac);
+                        packetOut(srcPoint, arpPkt);
+                        return;
+                    }
+                }
+                // Fall through to normal proxy ARP if anycast server MAC not found
+            }
+
             // Handle ProxyARP
             MacAddress cachedDstMac = ipToMacTable.asJavaMap().get(dstIp);
 
@@ -972,6 +1006,84 @@ public class AppComponent {
         }
     }
 
+    private boolean isAnycastIp(Ip4Address dstIp) {
+        return anycastIp != null && dstIp.equals(anycastIp);
+    }
+
+    private ConnectPoint selectNearestAnycastServer(ConnectPoint ingressCP) {
+        if (anycast1ConnectPoint == null || anycast2ConnectPoint == null) {
+            log.warn("Anycast connect points not configured");
+            return null;
+        }
+
+        DeviceId ingressDevice = ingressCP.deviceId();
+        String ingressDevStr = ingressDevice.toString();
+
+        int distanceToAnycast1; // anycast1 on ovs1
+        int distanceToAnycast2; // anycast2 on ovs2
+
+        if (ingressDevStr.contains("0000000000000001")) {
+            // Traffic arrived at ovs1 (h2, frr0, frr1)
+            distanceToAnycast1 = 0; // same switch
+            distanceToAnycast2 = 1; // ovs1 -> ovs2
+        } else if (ingressDevStr.contains("0000000000000002")) {
+            // Traffic arrived at ovs2 (h1, peer VXLAN)
+            distanceToAnycast1 = 1; // ovs2 -> ovs1
+            distanceToAnycast2 = 0; // same switch
+        } else {
+            // Unknown device, default to anycast1 (on ovs1)
+            log.warn("Unknown ingress device: {}. Defaulting to anycast1.", ingressDevice);
+            return anycast1ConnectPoint;
+        }
+
+        ConnectPoint selected = (distanceToAnycast1 <= distanceToAnycast2)
+                ? anycast1ConnectPoint
+                : anycast2ConnectPoint;
+
+        log.info("Anycast selection: ingress={}, dist1={}, dist2={}, selected={}",
+                ingressCP, distanceToAnycast1, distanceToAnycast2, selected);
+
+        return selected;
+    }
+
+    /**
+     * Get the MAC address of the anycast server at the given connect point.
+     * Uses HostService to find hosts at that location.
+     */
+    private MacAddress getAnycastServerMac(ConnectPoint serverCp) {
+        for (Host host : hostService.getConnectedHosts(serverCp)) {
+            for (IpAddress ip : host.ipAddresses()) {
+                if (ip.isIp4() && ip.getIp4Address().equals(anycastIp)) {
+                    return host.mac();
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Handle L3 routing to anycast destination.
+     * Selects nearest server based on ingress point and routes packet.
+     */
+    private void handleAnycastRouting(PacketContext context, Ethernet eth, ConnectPoint ingressCP) {
+        ConnectPoint nearestServer = selectNearestAnycastServer(ingressCP);
+
+        if (nearestServer == null) {
+            log.warn("Cannot route anycast: no server configured");
+            return;
+        }
+
+        MacAddress serverMac = getAnycastServerMac(nearestServer);
+        if (serverMac != null) {
+            log.info("Anycast L3 routing: ingress={} -> server at {} (MAC={})",
+                    ingressCP, nearestServer, serverMac);
+            routePacket(context, eth, serverMac, nearestServer);
+        } else {
+            log.warn("Anycast server MAC not found at {}. Flooding.", nearestServer);
+            flood(context);
+        }
+    }
+
     private void routeToLocalSubnet(PacketContext context, Ethernet eth) {
         IPv4 ipv4 = (IPv4) eth.getPayload();
         Ip4Address dstIp = Ip4Address.valueOf(ipv4.getDestinationAddress());
@@ -980,6 +1092,13 @@ public class AppComponent {
 
         log.info("[Gateway] Routing packet to local subnet: src {} -> dst {} on device {}",
                 srcIp, dstIp, ingressDevice);
+
+        // Check if destination is anycast IP
+        if (isAnycastIp(dstIp)) {
+            ConnectPoint ingressCP = context.inPacket().receivedFrom();
+            handleAnycastRouting(context, eth, ingressCP);
+            return;
+        }
 
         MacAddress dstMac = ipToMacTable.asJavaMap().get(dstIp);
 
@@ -1120,13 +1239,14 @@ public class AppComponent {
 
         // Determine the destination MAC based on the next hop
         Ip6Address nextHopIp6 = nextHop.getIp6Address();
-        
+
         if (nextHopIp6.isLinkLocal()) {
             log.info("[Gateway] L3 IPv6: Next-hop {} is link-local.",
                     nextHopIp6);
         }
 
-        // Use HostService to resolve next-hop MAC (more reliable for link-local addresses)
+        // Use HostService to resolve next-hop MAC (more reliable for link-local
+        // addresses)
         MacAddress dstMac = null;
         Set<Host> hosts = hostService.getHostsByIp(nextHopIp6);
         if (!hosts.isEmpty()) {
@@ -1146,7 +1266,7 @@ public class AppComponent {
                     nextHopIp6);
             return;
         }
-    
+
         log.info("[Gateway] L3 IPv6: Found NEXT-HOP MAC {}.", dstMac);
         ConnectPoint outPoint = findIp6NextHopOutput(eth, nextHopIp6);
 

@@ -13,9 +13,9 @@ PEER2_NETWORK_ID=36
 
 # --- 2. Create Docker Containers ---
 echo "Creating containers (h1, h2, h3, frr0, frr1)..."
-docker run -d --name h1 --hostname h1 --network none --cap-add=NET_ADMIN host sleep infinity
-docker run -d --name h2 --hostname h2 --network none --cap-add=NET_ADMIN host sleep infinity
-docker run -d --name h3 --hostname h3 --network none --cap-add=NET_ADMIN host sleep infinity
+docker run -d --name h1 --hostname h1 --network none --cap-add=NET_ADMIN --privileged host sleep infinity
+docker run -d --name h2 --hostname h2 --network none --cap-add=NET_ADMIN --privileged host sleep infinity
+docker run -d --name h3 --hostname h3 --network none --cap-add=NET_ADMIN --privileged host sleep infinity
 
 # FRR containers for routers r0 and r1
 # Mount config files from config/ directory
@@ -134,6 +134,22 @@ ovs-vsctl add-port ovs2 TO_${PEER1_NETWORK_ID}_VXLAN -- set interface TO_${PEER1
 ovs-vsctl add-port ovs2 TO_${PEER2_NETWORK_ID}_VXLAN -- set interface TO_${PEER2_NETWORK_ID}_VXLAN type=vxlan \
     options:remote_ip=192.168.61.${PEER2_NETWORK_ID} \
     options:local_ip=192.168.61.${NETWORK_ID}
+
+
+# --- Anycast Server Containers ---
+echo "Creating anycast server containers..."
+# Use traefik/whoami which serves HTTP on port 80 showing hostname
+docker run -d --name anycast1 --hostname anycast1 --network none \
+  --cap-add=NET_ADMIN traefik/whoami
+
+docker run -d --name anycast2 --hostname anycast2 --network none \
+  --cap-add=NET_ADMIN traefik/whoami
+
+# Connect anycast1 to ovs1 (closer to h2, frr0, frr1)
+connect_to_ovs anycast1 ovs1
+
+# Connect anycast2 to ovs2 (closer to h1, peer VXLANs)
+connect_to_ovs anycast2 ovs2
 
 
 

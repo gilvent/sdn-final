@@ -105,3 +105,19 @@ dexec frr0 ip -6 addr add 2a0b:4e07:c4:${NETWORK_ID}::69/64 dev eth0
 
 # Set MAC address on frr0's eth0 (same as IPv4, ensures consistency for vrouter ONOS app)
 dexec frr0 ip link set eth0 address 00:00:00:00:${NETWORK_ID}:01
+
+# --- 6. Anycast Server Configuration ---
+ANYCAST_IP="172.16.${NETWORK_ID}.100"
+
+echo "Configuring anycast servers with shared IP ${ANYCAST_IP}..."
+
+# Configure IP using nsenter (traefik/whoami has no ip command inside)
+# traefik/whoami already serves HTTP on port 80 showing hostname
+for container in anycast1 anycast2; do
+  echo "Setting up ${container}..."
+  PID=$(docker inspect -f '{{.State.Pid}}' ${container})
+
+  # Configure IP address using nsenter
+  nsenter -t $PID -n ip addr add ${ANYCAST_IP}/24 dev eth0
+  nsenter -t $PID -n ip route replace default via 172.16.${NETWORK_ID}.69
+done

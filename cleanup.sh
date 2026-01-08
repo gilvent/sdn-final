@@ -2,8 +2,8 @@
 set -e
 
 echo "Stopping and removing all containers..."
-docker stop h1 h2 h3 frr0 frr1 onos > /dev/null 2>&1 || true
-docker rm h1 h2 h3 frr0 frr1 onos > /dev/null 2>&1 || true
+docker stop h1 h2 h3 frr0 frr1 onos anycast1 anycast2 > /dev/null 2>&1 || true
+docker rm h1 h2 h3 frr0 frr1 onos anycast1 anycast2 > /dev/null 2>&1 || true
 
 echo "Removing Docker networks..."
 docker network rm as65351-intra > /dev/null 2>&1 || true
@@ -19,6 +19,8 @@ ovs-vsctl del-port ovs1 ovs1-ovs2-veth > /dev/null 2>&1 || true
 ovs-vsctl del-port ovs2 h1-port > /dev/null 2>&1 || true
 ovs-vsctl del-port ovs2 ovs2-ovs1-veth > /dev/null 2>&1 || true
 ovs-vsctl del-port ovs2 TO_TA_VXLAN > /dev/null 2>&1 || true
+ovs-vsctl del-port ovs1 anycast1-port > /dev/null 2>&1 || true
+ovs-vsctl del-port ovs2 anycast2-port > /dev/null 2>&1 || true
 
 # Delete OVS bridges
 ovs-vsctl del-br ovs1 > /dev/null 2>&1 || true
@@ -38,5 +40,9 @@ ip link delete frr1-veth type veth > /dev/null 2>&1 || true
 ip link delete frr1-port type veth > /dev/null 2>&1 || true
 ip link delete h3-r1-veth type veth > /dev/null 2>&1 || true
 ip link delete r1-h3-veth type veth > /dev/null 2>&1 || true
+ip link delete anycast1-veth type veth > /dev/null 2>&1 || true
+ip link delete anycast1-port type veth > /dev/null 2>&1 || true
+ip link delete anycast2-veth type veth > /dev/null 2>&1 || true
+ip link delete anycast2-port type veth > /dev/null 2>&1 || true
 
 echo "Cleanup complete."

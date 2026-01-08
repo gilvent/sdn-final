@@ -58,6 +58,9 @@ public class VRouterConfig extends Config<ApplicationId> {
     private static final String PEER2_TRADITIONAL_PREFIX6 = "peer2-traditional-prefix6";
     private static final String INGRESS_FILTERS = "ingress-filters";
     private static final String ARP_INGRESS_FILTERS = "arp-ingress-filters";
+    private static final String ANYCAST_IP = "anycast-ip";
+    private static final String ANYCAST1_CONNECT_POINT = "anycast1-connect-point";
+    private static final String ANYCAST2_CONNECT_POINT = "anycast2-connect-point";
 
     @Override
     public boolean isValid() {
@@ -69,7 +72,8 @@ public class VRouterConfig extends Config<ApplicationId> {
                 LOCAL_TRADITIONAL_PREFIX, LOCAL_TRADITIONAL_PREFIX6,
                 PEER1_TRADITIONAL_PREFIX, PEER2_TRADITIONAL_PREFIX,
                 PEER1_TRADITIONAL_PREFIX6, PEER2_TRADITIONAL_PREFIX6,
-                INGRESS_FILTERS, ARP_INGRESS_FILTERS);
+                INGRESS_FILTERS, ARP_INGRESS_FILTERS,
+                ANYCAST_IP, ANYCAST1_CONNECT_POINT, ANYCAST2_CONNECT_POINT);
     }
 
     /**
@@ -353,5 +357,20 @@ public class VRouterConfig extends Config<ApplicationId> {
             });
         }
         return prefixes;
+    }
+
+    public Ip4Address anycastIp() {
+        String ip = get(ANYCAST_IP, null);
+        return ip != null ? Ip4Address.valueOf(ip) : null;
+    }
+
+    public ConnectPoint anycast1ConnectPoint() {
+        String cp = get(ANYCAST1_CONNECT_POINT, null);
+        return cp != null ? ConnectPoint.deviceConnectPoint(cp) : null;
+    }
+
+    public ConnectPoint anycast2ConnectPoint() {
+        String cp = get(ANYCAST2_CONNECT_POINT, null);
+        return cp != null ? ConnectPoint.deviceConnectPoint(cp) : null;
     }
 }
