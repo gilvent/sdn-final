@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-SDN lab workspace for NYCU WINLAB coursework implementing a two-Autonomous System BGP topology with ONOS controller, OVS switches, and FRR routers. The project uses Docker containers, WireGuard tunnels, and VXLAN for connectivity.
+SDN lab workspace implementing a two-Autonomous System BGP topology with ONOS controller, OVS switches, and FRR routers. The project uses Docker containers, WireGuard tunnels, and VXLAN for connectivity.
 
 ## Build Commands
 
@@ -17,12 +17,15 @@ make all       # clean + deploy
 ```
 
 ### Step-by-Step Deployment
-
+1. Create the topology
 ```bash
-make onos      # Start ONOS controller container
-make setup     # Create Docker containers and OVS topology
-make config    # Configure IP addresses and FRR/BGP
-make status    # Show FRR BGP status on both routers
+make clean
+make deploy
+```
+
+2. Install Network Config and Vrouter App
+```bash
+./install_vrouter.sh
 ```
 
 ### vRouter ONOS Application
@@ -48,9 +51,13 @@ onos-netcfg localhost config.json
 - Host: h3 (172.17.35.2)
 - Router: frr1 (192.168.63.2)
 
-**Inter-AS Link**: frr0 ↔ frr1 via 192.168.63.0/24 (eBGP)
+**Inter-AS Link with AS65351**: frr0 ↔ frr1 via 192.168.63.0/24 (eBGP)
 
 **Transit to AS65000**: VXLAN over WireGuard tunnel (ovs2 → ovs3)
+
+**Peer Inter-AS Link**: Two paths
+- Destination is `172.16.yy.0`: VXLAN over Wireguard tunnel (ovs2 → peer's ovs2)
+- Destination is `172.17.yy.0`: Transit to AS65000 (ovs3 → peer's ovs3) 
 
 ### vRouter Application Structure
 
@@ -70,6 +77,7 @@ vrouter/
 
 ### Setup Scripts
 
+- `setup_network_id.sh` - Setup necessary network IDs in config scripts, and generate configs from `config-templates/`
 - `create.sh` - Creates Docker containers (h1, h2, h3, frr0, frr1, onos), OVS bridges, veth pairs, VXLAN tunnel
 - `config.sh` - Assigns IP addresses, configures default routes, starts FRR daemons
 - `cleanup.sh` - Removes all containers and network components
@@ -84,14 +92,14 @@ FRR configs are in `config/frr0/` and `config/frr1/`:
 
 ## Common Commands
 
-### ONOS CLI (ssh -p 8101 onos@localhost, password: rocks)
-
+### ONOS Apache Karaf Client
+Command: 
 ```bash
-apps -a -s           # List active apps
-flows                # Show flow rules
-hosts                # Show discovered hosts
-routes               # Show routes from FPM
-log:tail             # View logs
+docker exec -it onos /root/onos/apache-karaf-4.2.14/bin/client links apps -a -s           # List active apps
+docker exec -it onos /root/onos/apache-karaf-4.2.14/bin/client links flows                # Show flow rules
+docker exec -it onos /root/onos/apache-karaf-4.2.14/bin/client links hosts                # Show discovered hosts
+docker exec -it onos /root/onos/apache-karaf-4.2.14/bin/client links routes               # Show resolved routes from FPM
+docker exec -it onos /root/onos/apache-karaf-4.2.14/bin/client links log:tail             # View logs
 ```
 
 ### Debugging
@@ -100,13 +108,13 @@ log:tail             # View logs
 docker exec frr0 vtysh -c "show bgp summary"              # Check BGP status
 docker exec frr0 vtysh -c "show ip route"                 # Check routes
 ovs-ofctl dump-flows ovs1 -O OpenFlow14                   # Show OVS flows
-docker logs onos                                           # ONOS logs
+docker logs onos                                          # ONOS logs
 ```
 
 ### Container Access
 
 ```bash
-docker exec -it h1 sh                                      # Shell into host
+docker exec -it h1 sh                                    # Shell into host
 docker exec -it frr0 vtysh                                 # FRR CLI
 docker exec -it onos bash                                  # ONOS container
 ```
@@ -116,7 +124,7 @@ docker exec -it onos bash                                  # ONOS container
 1. Intra-AS Communication (h1 ↔ h2)
 2. Inter-AS Communication (h1/h2 ↔ h3)
 3. BGP Peering with AS65000 (transit network)
-4. Peer Network to Peer Network Communication (AS65340/AS65360)
+4. Peer Network Communication (AS65350 ↔ AS65340/AS65360)
 
 ## Key Files
 
@@ -124,4 +132,3 @@ docker exec -it onos bash                                  # ONOS container
 - `config/frr0/frr.conf` - AS65350 BGP configuration
 - `config/frr1/frr.conf` - AS65351 BGP configuration
 - `STU-35.conf` - WireGuard tunnel configuration
-- `fpm-config.json` - FPM (Forwarding Plane Manager) configuration
